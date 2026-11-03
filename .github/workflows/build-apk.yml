@@ -1,0 +1,65 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      # สร้างโครง Android ให้อัตโนมัติ โดยไม่ทับ main.dart / pubspec.yaml ของเรา
+      - name: Generate Android scaffold
+        run: |
+          cp pubspec.yaml /tmp/pubspec.yaml
+          cp lib/main.dart /tmp/main.dart
+          flutter create . --platforms=android --project-name mfb_pro --org com.mfbpro
+          cp /tmp/pubspec.yaml pubspec.yaml
+          cp /tmp/main.dart lib/main.dart
+
+      - name: Add BLE / GPS permissions + app name
+        run: |
+          M=android/app/src/main/AndroidManifest.xml
+          python3 - "$M" <<'PY'
+          import sys, re
+          p = sys.argv[1]
+          s = open(p, encoding="utf-8").read()
+          perms = '''
+              <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation"/>
+              <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+              <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30"/>
+              <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30"/>
+              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+              <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+              <uses-feature android:name="android.hardware.bluetooth_le" android:required="true"/>
+          '''
+          s = re.sub(r'(<manifest[^>]*>)', r'\1' + perms, s, count=1)
+          s = re.sub(r'android:label="[^"]*"', 'android:label="MFB-PRO"', s, count=1)
+          open(p, "w", encoding="utf-8").write(s)
+          PY
+
+      - run: flutter pub get
+
+      - name: Build APK
+        run: flutter build apk --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MFB-PRO-apk
+          path: app/build/app/outputs/flutter-apk/app-release.apk
