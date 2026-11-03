@@ -54,6 +54,20 @@ jobs:
           open(p, "w", encoding="utf-8").write(s)
           PY
 
+      # แก้ error: ไลบรารีบางตัวคอมไพล์กับ android-33 แต่ dependency ต้องการ 34+
+      - name: Force compileSdk 36 for plugin modules
+        run: |
+          mkdir -p ~/.gradle
+          cat > ~/.gradle/init.gradle <<'EOG'
+          allprojects {
+            afterEvaluate { p ->
+              if (p.plugins.hasPlugin('com.android.library')) {
+                p.android.compileSdkVersion 36
+              }
+            }
+          }
+          EOG
+
       - run: flutter pub get
 
       - name: Build APK
