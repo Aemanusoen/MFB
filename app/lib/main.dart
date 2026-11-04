@@ -1,433 +1,205 @@
-import 'dart:typed_data';
-import 'dart:async';
-import 'dart:math' as math;
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-import 'package:flutter_blue_plus/flutter_blue_plus.dart';
-import 'package:geolocator/geolocator.dart';
-import 'package:permission_handler/permission_handler.dart';
-import 'package:wakelock_plus/wakelock_plus.dart';
+/*
+ * BleGauge.h  -  ส่งค่า car.* ไปแอพมือถือผ่าน BLE (NimBLE-Arduino 1.4.x)
+ *
+ * ติดตั้ง: Library Manager -> "NimBLE-Arduino" (เวอร์ชัน 1.4.x)
+ * ใช้งาน : 1) วางไฟล์นี้ในโฟลเดอร์ Test1
+ *          2) ใน Test1.ino ใส่ #include "BleGauge.h" ก่อนบรรทัด #include "UI.h"
+ *          3) ใน setup() เพิ่ม bleStart();  (ต่อจาก ui_init())
+ *
+ * Service  : 7a0f0001-5a41-5201-9c11-2a52a1c0de01
+ *  - DATA  (notify) 7a0f0002-...  : แพ็กเก็ต 34 ไบต์ ทุก BLE_PERIOD_MS
+ *  - CMD   (write)  7a0f0003-...  : [cmd][arg]   cmd 1 = ลบ DTC, cmd 2 = เปลี่ยนรุ่นรถ (arg = BM_*)
+ *  - IMG   (write)  7a0f0004-...  : ส่งโลโก้เปิดเครื่อง 320x240 RGB565 (153600 ไบต์) เก็บใน LittleFS (/logo.raw)
+ *        [1][u32 size]  เริ่ม | [2][data...] ข้อมูล | [3][u16 sum] จบ (sum = ผลรวมไบต์ทั้งหมด mod 65536) | [4] ลบโลโก้ (กลับไปใช้ภาพเดิมในโค้ด)
+ *        สถานะส่งกลับในแพ็กเก็ต DATA ไบต์ที่ 5: 0 ว่าง, 1 กำลังรับ, 2 สำเร็จ, 3 ผิดพลาด
+ *
+ * แพ็กเก็ต DATA (little-endian):
+ *   0 u8 version(=1)   1 u8 state   2 u8 proto   3 u8 flags (bit0 = ข้อมูลสด)
+ *   4 u8 bikeModel     5 u8 imgState
+ *   6.. int16 x 14  : rpm, speed*10, ect*10, iat*10, eot*10, tps*10, map*10,
+ *                     batt*100, afr*100, ign*10, inj*100, o2v*1000, stft*1000, ltft*1000
+ *   ltft*1000 อยู่ที่ offset 32 รวมทั้งหมด 34 ไบต์
+ *   ค่า NaN / ไม่มีข้อมูล = 0x7FFF
+ */
+#pragma once
+#include <NimBLEDevice.h>
+#include <LittleFS.h>
 
-// ---------- BLE UUIDs (ต้องตรงกับ BleGauge.h) ----------
-final Guid kSvc = Guid('7a0f0001-5a41-5201-9c11-2a52a1c0de01');
-final Guid kData = Guid('7a0f0002-5a41-5201-9c11-2a52a1c0de01');
-final Guid kCmd = Guid('7a0f0003-5a41-5201-9c11-2a52a1c0de01');
+#define BLE_NAME       "MFB-PRO"
+#define BLE_PERIOD_MS  80
+#define BLE_PKT_LEN    34
+#define BLE_NAN        0x7FFF
 
-const kBg = Color(0xFF0B0B0E);
-const kAccent = Color(0xFFFF2A2A);
-const kDim = Color(0xFF2F2F38);
-const kBorder = Color(0xFF4A2A2C);
-const kLabel = Color(0xFF8D8D9A);
-const kRed = Color(0xFFFF3B5C);
-const kGreen = Color(0xFF3CFF8A);
-const kAmber = Color(0xFFFFB020);
+#define BLE_SVC_UUID   "7a0f0001-5a41-5201-9c11-2a52a1c0de01"
+#define BLE_DATA_UUID  "7a0f0002-5a41-5201-9c11-2a52a1c0de01"
+#define BLE_CMD_UUID   "7a0f0003-5a41-5201-9c11-2a52a1c0de01"
+#define BLE_IMG_UUID   "7a0f0004-5a41-5201-9c11-2a52a1c0de01"
 
-// ---------- ข้อมูลจาก ESP32 ----------
-class Telemetry {
-  final bool fresh;
-  final int state, proto, bike;
-  final double? rpm, speed, ect, iat, eot, tps, map, batt, afr, ign, inj, o2v, stft, ltft;
-  Telemetry({
-    this.fresh = false, this.state = 0, this.proto = 0, this.bike = 0,
-    this.rpm, this.speed, this.ect, this.iat, this.eot, this.tps, this.map,
-    this.batt, this.afr, this.ign, this.inj, this.o2v, this.stft, this.ltft,
-  });
+#define LOGO_W      320
+#define LOGO_H      240
+#define LOGO_BYTES  (LOGO_W * LOGO_H * 2)
 
-  static Telemetry? parse(List<int> b) {
-    if (b.length < 34 || b[0] != 1) return null;
-    final d = ByteData.sublistView(Uint8List.fromList(b));
-    double? f(int off, double k) {
-      final v = d.getInt16(off, Endian.little);
-      return v == 0x7FFF ? null : v / k;
-    }
-    return Telemetry(
-      state: b[1], proto: b[2], fresh: (b[3] & 1) != 0, bike: b[4],
-      rpm: f(6, 1), speed: f(8, 10), ect: f(10, 10), iat: f(12, 10),
-      eot: f(14, 10), tps: f(16, 10), map: f(18, 10), batt: f(20, 100),
-      afr: f(22, 100), ign: f(24, 10), inj: f(26, 100), o2v: f(28, 1000),
-      stft: f(30, 1000), ltft: f(32, 1000),
-    );
-  }
+static NimBLEServer*         bleServer = nullptr;
+static NimBLECharacteristic* bleData   = nullptr;
+static volatile bool         bleConnected = false;
+static volatile uint8_t      imgState = 0;
+
+// ---------- โลโก้เปิดเครื่องที่ส่งมาจากแอพ ----------
+// ใช้ใน UI.h ตอนวาด splash: ถ้ามีไฟล์ใช้ภาพนี้ ถ้าไม่มีใช้ splash_img เดิม
+static bool logoOpen(File &f) {
+  if (!LittleFS.begin(true)) return false;
+  if (!LittleFS.exists("/logo.raw")) return false;
+  f = LittleFS.open("/logo.raw", "r");
+  if (!f) return false;
+  if ((size_t)f.size() != (size_t)LOGO_BYTES) { f.close(); return false; }
+  return true;
 }
 
-enum LinkState { idle, scanning, connecting, connected }
+struct ImgMsg { uint8_t type; uint8_t len; uint8_t d[200]; };
+static QueueHandle_t imgQ = nullptr;
 
-// ---------- ตัวจัดการ BLE + GPS + Demo ----------
-class GaugeController extends ChangeNotifier {
-  Telemetry t = Telemetry();
-  LinkState link = LinkState.idle;
-  bool demo = false;
-  bool gpsOk = false;
-  double? gpsSpeed; // km/h
-  double topSpeed = 0;
-  double peakRpm = 0;
-  String? error;
-
-  BluetoothDevice? _dev;
-  BluetoothCharacteristic? _cmd;
-  StreamSubscription? _scanSub, _dataSub, _connSub, _gpsSub;
-  Timer? _demoTimer, _retryTimer;
-  bool _auto = false;
-
-  bool get ecuLive => link == LinkState.connected && t.fresh;
-  double? get shownSpeed => t.speed ?? gpsSpeed;
-
-  Future<void> init() async {
-    await WakelockPlus.enable();
-    await _startGps();
-  }
-
-  Future<void> _startGps() async {
-    try {
-      final perm = await Geolocator.requestPermission();
-      if (perm == LocationPermission.denied || perm == LocationPermission.deniedForever) return;
-      _gpsSub = Geolocator.getPositionStream(
-        locationSettings: const LocationSettings(accuracy: LocationAccuracy.best, distanceFilter: 0),
-      ).listen((p) {
-        gpsOk = true;
-        gpsSpeed = math.max(0, p.speed * 3.6);
-        _track();
-        notifyListeners();
-      }, onError: (_) {
-        gpsOk = false;
-        notifyListeners();
-      });
-    } catch (_) {}
-  }
-
-  void _track() {
-    final s = shownSpeed;
-    if (s != null && s > topSpeed) topSpeed = s;
-    if (t.rpm != null && t.rpm! > peakRpm) peakRpm = t.rpm!;
-  }
-
-  void resetPeaks() {
-    topSpeed = 0;
-    peakRpm = 0;
-    notifyListeners();
-  }
-
-  // ----- BLE -----
-  Future<void> connect() async {
-    if (demo) toggleDemo();
-    _auto = true;
-    error = null;
-    await [Permission.bluetoothScan, Permission.bluetoothConnect, Permission.locationWhenInUse].request();
-    if (await FlutterBluePlus.adapterState.first != BluetoothAdapterState.on) {
-      try { await FlutterBluePlus.turnOn(); } catch (_) {}
-    }
-    await _scanAndConnect();
-  }
-
-  Future<void> _scanAndConnect() async {
-    if (!_auto) return;
-    link = LinkState.scanning;
-    notifyListeners();
-    await _scanSub?.cancel();
-    final done = Completer<BluetoothDevice?>();
-    _scanSub = FlutterBluePlus.scanResults.listen((rs) {
-      for (final r in rs) {
-        if (!done.isCompleted) done.complete(r.device);
+static void imgTask(void*) {
+  ImgMsg m; File f; bool open = false;
+  uint32_t expect = 0, got = 0; uint16_t sum = 0;
+  for (;;) {
+    if (xQueueReceive(imgQ, &m, portMAX_DELAY) != pdTRUE) continue;
+    switch (m.type) {
+      case 1: {                                   // START [u32 size]
+        if (open) { f.close(); open = false; }
+        if (m.len < 4) { imgState = 3; break; }
+        expect = (uint32_t)m.d[0] | ((uint32_t)m.d[1] << 8) | ((uint32_t)m.d[2] << 16) | ((uint32_t)m.d[3] << 24);
+        if (expect != (uint32_t)LOGO_BYTES || !LittleFS.begin(true)) { imgState = 3; break; }
+        LittleFS.remove("/logo.tmp");
+        f = LittleFS.open("/logo.tmp", "w");
+        if (!f) { imgState = 3; break; }
+        open = true; got = 0; sum = 0; imgState = 1;
+        break;
       }
-    });
-    await FlutterBluePlus.startScan(withServices: [kSvc], timeout: const Duration(seconds: 8));
-    final dev = await done.future.timeout(const Duration(seconds: 9), onTimeout: () => null);
-    await FlutterBluePlus.stopScan();
-    await _scanSub?.cancel();
-    if (dev == null) {
-      error = 'ไม่พบ MFB-PRO';
-      link = LinkState.idle;
-      notifyListeners();
-      _scheduleRetry();
-      return;
-    }
-    await _open(dev);
-  }
-
-  Future<void> _open(BluetoothDevice dev) async {
-    try {
-      link = LinkState.connecting;
-      notifyListeners();
-      _dev = dev;
-      await dev.connect(timeout: const Duration(seconds: 10));
-      try { await dev.requestMtu(185); } catch (_) {}
-      final services = await dev.discoverServices();
-      final svc = services.firstWhere((s) => s.uuid == kSvc);
-      final data = svc.characteristics.firstWhere((c) => c.uuid == kData);
-      _cmd = svc.characteristics.firstWhere((c) => c.uuid == kCmd);
-      await data.setNotifyValue(true);
-      await _dataSub?.cancel();
-      _dataSub = data.onValueReceived.listen((v) {
-        final p = Telemetry.parse(v);
-        if (p != null) {
-          t = p;
-          _track();
-          notifyListeners();
+      case 2: {                                   // DATA
+        if (!open) break;
+        if (got + m.len > expect || f.write(m.d, m.len) != m.len) { f.close(); open = false; imgState = 3; break; }
+        for (uint8_t i = 0; i < m.len; i++) sum += m.d[i];
+        got += m.len;
+        break;
+      }
+      case 3: {                                   // END [u16 sum]
+        if (!open) { imgState = 3; break; }
+        f.close(); open = false;
+        uint16_t want = (m.len >= 2) ? (uint16_t)(m.d[0] | (m.d[1] << 8)) : 0;
+        if (got == expect && want == sum) {
+          LittleFS.remove("/logo.raw");
+          LittleFS.rename("/logo.tmp", "/logo.raw");
+          imgState = 2;
+        } else {
+          LittleFS.remove("/logo.tmp");
+          imgState = 3;
         }
-      });
-      await _connSub?.cancel();
-      _connSub = dev.connectionState.listen((s) {
-        if (s == BluetoothConnectionState.disconnected) {
-          link = LinkState.idle;
-          t = Telemetry();
-          notifyListeners();
-          _scheduleRetry();
-        }
-      });
-      link = LinkState.connected;
-      notifyListeners();
-    } catch (e) {
-      error = 'เชื่อมต่อไม่สำเร็จ';
-      link = LinkState.idle;
-      notifyListeners();
-      _scheduleRetry();
+        break;
+      }
+      case 4:                                     // DELETE -> กลับไปใช้โลโก้เดิม
+        if (LittleFS.begin(true)) LittleFS.remove("/logo.raw");
+        imgState = 2;
+        break;
     }
   }
+}
 
-  void _scheduleRetry() {
-    _retryTimer?.cancel();
-    if (_auto) _retryTimer = Timer(const Duration(seconds: 3), _scanAndConnect);
+static inline int16_t bleScale(float v, float k) {
+  if (isnan(v)) return BLE_NAN;
+  float s = v * k;
+  if (s > 32000.f) s = 32000.f;
+  if (s < -32000.f) s = -32000.f;
+  return (int16_t)lroundf(s);
+}
+static inline void blePut(uint8_t *p, int idx, int16_t v) {
+  p[idx] = (uint8_t)(v & 0xFF);
+  p[idx + 1] = (uint8_t)((uint16_t)v >> 8);
+}
+
+class BleSrvCb : public NimBLEServerCallbacks {
+  void onConnect(NimBLEServer* s, ble_gap_conn_desc* desc) override {
+    bleConnected = true;
+    s->updateConnParams(desc->conn_handle, 12, 24, 0, 200);   // 15-30 ms interval
   }
-
-  Future<void> disconnect() async {
-    _auto = false;
-    _retryTimer?.cancel();
-    await _dataSub?.cancel();
-    await _connSub?.cancel();
-    try { await _dev?.disconnect(); } catch (_) {}
-    link = LinkState.idle;
-    t = Telemetry();
-    notifyListeners();
+  void onDisconnect(NimBLEServer* s) override {
+    bleConnected = false;
+    NimBLEDevice::startAdvertising();
   }
+};
 
-  Future<void> sendCmd(List<int> bytes) async {
-    try { await _cmd?.write(bytes, withoutResponse: false); } catch (_) {}
-  }
-
-  // ----- DEMO -----
-  void toggleDemo() {
-    demo = !demo;
-    _demoTimer?.cancel();
-    if (demo) {
-      final sw = Stopwatch()..start();
-      _demoTimer = Timer.periodic(const Duration(milliseconds: 60), (_) {
-        final s = sw.elapsedMilliseconds / 1000.0;
-        final k = (math.sin(s * 0.6) + 1) / 2;
-        t = Telemetry(
-          fresh: true, state: 1, proto: 1,
-          rpm: 1500 + 7000 * k, speed: 90 * k, ect: 82 + 6 * k, iat: 34,
-          tps: 5 + 80 * k, batt: 13.8, afr: 13.2 + 2 * (1 - k), ign: 12 + 18 * k,
-        );
-        _track();
-        notifyListeners();
-      });
-    } else {
-      t = Telemetry();
+class BleCmdCb : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic* c) override {
+    std::string v = c->getValue();
+    if (v.size() < 1) return;
+    uint8_t cmd = (uint8_t)v[0];
+    if (cmd == 1) {
+      dtcClearReq = true;
+    } else if (cmd == 2 && v.size() >= 2) {
+      uint8_t m = (uint8_t)v[1];
+      if (m < BM_COUNT && m != bikeModel) { bikeModel = m; bikeChanged = true; }   // ไม่บันทึกลง Flash (ตั้งถาวรที่หน้า SETUP)
     }
-    notifyListeners();
   }
+};
 
-  @override
-  void dispose() {
-    _demoTimer?.cancel();
-    _retryTimer?.cancel();
-    _scanSub?.cancel();
-    _dataSub?.cancel();
-    _connSub?.cancel();
-    _gpsSub?.cancel();
-    super.dispose();
+class BleImgCb : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic* c) override {
+    std::string v = c->getValue();
+    if (v.size() < 1 || v.size() > 201 || !imgQ) return;
+    ImgMsg m; m.type = (uint8_t)v[0]; m.len = (uint8_t)(v.size() - 1);
+    if (m.len) memcpy(m.d, v.data() + 1, m.len);
+    xQueueSend(imgQ, &m, pdMS_TO_TICKS(500));     // รอได้สูงสุด 0.5 วิ = backpressure ให้แอพส่งช้าลงถ้าเขียน Flash ไม่ทัน
   }
-}
+};
 
-// ---------- UI ----------
-void main() {
-  WidgetsFlutterBinding.ensureInitialized();
-  SystemChrome.setPreferredOrientations([DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]);
-  SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-  runApp(const MfbProApp());
-}
-
-class MfbProApp extends StatelessWidget {
-  const MfbProApp({super.key});
-  @override
-  Widget build(BuildContext context) => MaterialApp(
-        debugShowCheckedModeBanner: false,
-        title: 'MFB-PRO',
-        theme: ThemeData.dark().copyWith(scaffoldBackgroundColor: kBg),
-        home: const GaugePage(),
-      );
-}
-
-class GaugePage extends StatefulWidget {
-  const GaugePage({super.key});
-  @override
-  State<GaugePage> createState() => _GaugePageState();
-}
-
-class _GaugePageState extends State<GaugePage> {
-  final c = GaugeController();
-  @override
-  void initState() {
-    super.initState();
-    c.init();
-    c.addListener(() => mounted ? setState(() {}) : null);
-  }
-
-  @override
-  void dispose() {
-    c.dispose();
-    super.dispose();
-  }
-
-  String _fmt(double? v, int dec) => v == null ? '--' : v.toStringAsFixed(dec);
-
-  @override
-  Widget build(BuildContext context) {
-    final t = c.t;
-    final linkTxt = switch (c.link) {
-      LinkState.idle => 'OFFLINE',
-      LinkState.scanning => 'SCANNING',
-      LinkState.connecting => 'CONNECTING',
-      LinkState.connected => 'CONNECTED',
-    };
-    final linkCol = c.link == LinkState.connected ? kGreen : (c.link == LinkState.idle ? kRed : kAmber);
-    final speed = c.demo || c.link == LinkState.connected ? (c.shownSpeed ?? 0) : (c.gpsSpeed ?? 0);
-
-    return Scaffold(
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(10),
-          child: Column(children: [
-            // ----- top bar -----
-            Row(children: [
-              const Text('MFB-PRO', style: TextStyle(fontSize: 22, fontWeight: FontWeight.w900, color: kAccent, letterSpacing: 1)),
-              const SizedBox(width: 14),
-              _chip(linkTxt, linkCol),
-              _chip(c.ecuLive || c.demo ? 'ECU LIVE' : 'NO ECU', c.ecuLive || c.demo ? kGreen : kRed),
-              _chip(c.gpsOk ? 'GPS' : 'NO GPS', c.gpsOk ? kGreen : kRed),
-              const Spacer(),
-              _btn(c.link == LinkState.connected ? 'ตัดการเชื่อมต่อ' : 'เชื่อมต่อ',
-                  () => c.link == LinkState.connected ? c.disconnect() : c.connect()),
-              const SizedBox(width: 8),
-              _btn('DEMO', c.toggleDemo, active: c.demo),
-            ]),
-            const SizedBox(height: 8),
-            Expanded(
-              child: Row(children: [
-                SizedBox(width: 190, child: Column(children: [
-                  _tile('TPS', '%', _fmt(t.tps, 0), col: const Color(0xFF2EE6A6)),
-                  _tile('AFR', 'O2', _fmt(t.afr, 1), col: const Color(0xFFFF5A5F), bar: t.afr == null ? null : ((t.afr! - 10) / 8).clamp(0, 1)),
-                  _tile('IGN', '°BTDC', _fmt(t.ign, 1), col: const Color(0xFFB07CFF)),
-                ])),
-                Expanded(child: _centerGauge(speed, t.rpm)),
-                SizedBox(width: 190, child: Column(children: [
-                  _tile('ECT', '°C', _fmt(t.ect ?? t.eot, 0), col: const Color(0xFF3AA0FF), warn: (t.ect ?? 0) > 105),
-                  _tile('IAT', '°C', _fmt(t.iat, 0), col: const Color(0xFF7FD6FF)),
-                  _tile('BATTERY', 'V', _fmt(t.batt, 1), col: const Color(0xFFFFC233), warn: t.batt != null && t.batt! < 11.8),
-                  _tile('TOP SPEED', 'KM/H', c.topSpeed.toStringAsFixed(1), col: const Color(0xFFFF8A3D), onTap: c.resetPeaks, hint: 'RESET'),
-                ])),
-              ]),
-            ),
-          ]),
-        ),
-      ),
-    );
-  }
-
-  Widget _centerGauge(double speed, double? rpm) {
-    return Stack(alignment: Alignment.center, children: [
-      CustomPaint(
-        size: Size.infinite,
-        painter: ArcPainter(value: (speed / 180).clamp(0, 1).toDouble(), rpmFrac: rpm == null ? 0 : (rpm / 10000).clamp(0, 1).toDouble()),
-      ),
-      Column(mainAxisSize: MainAxisSize.min, children: [
-        Text(speed.toStringAsFixed(0), style: const TextStyle(fontSize: 76, fontWeight: FontWeight.w900, color: Colors.white, height: 1)),
-        Text('km/h${c.t.speed == null ? ' · GPS' : ' · ECU'}', style: const TextStyle(color: kLabel, fontSize: 13)),
-        const SizedBox(height: 6),
-        Text(rpm == null ? 'RPM --' : 'RPM ${rpm.toStringAsFixed(0)}', style: const TextStyle(fontSize: 18, color: Colors.white70)),
-      ]),
-    ]);
-  }
-
-  Widget _chip(String s, Color col) => Container(
-        margin: const EdgeInsets.only(right: 6),
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        decoration: BoxDecoration(border: Border.all(color: kBorder), borderRadius: BorderRadius.circular(4)),
-        child: Row(mainAxisSize: MainAxisSize.min, children: [
-          Container(width: 8, height: 8, decoration: BoxDecoration(color: col, shape: BoxShape.circle)),
-          const SizedBox(width: 6),
-          Text(s, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
-        ]),
-      );
-
-  Widget _btn(String s, VoidCallback f, {bool active = false}) => InkWell(
-        onTap: f,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-          decoration: BoxDecoration(
-            color: active ? kAccent.withOpacity(.35) : null,
-            border: Border.all(color: kAccent, width: 2),
-            borderRadius: BorderRadius.circular(4),
-          ),
-          child: Text(s, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-        ),
-      );
-
-  Widget _tile(String label, String unit, String value, {Color col = Colors.white, double? bar, bool warn = false, VoidCallback? onTap, String? hint}) {
-    return Expanded(
-      child: GestureDetector(
-        onTap: onTap,
-        child: Container(
-          margin: const EdgeInsets.only(bottom: 6),
-          padding: const EdgeInsets.fromLTRB(10, 4, 10, 4),
-          decoration: BoxDecoration(
-            border: Border.all(color: warn ? kRed : kBorder, width: 1.5),
-            borderRadius: BorderRadius.circular(7),
-            gradient: const LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Color(0xFF1A1A20), Color(0xFF0B0B0E)]),
-          ),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-              Text(label, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: kLabel)),
-              Text(hint ?? unit, style: const TextStyle(fontSize: 10, color: kLabel)),
-            ]),
-            Expanded(child: FittedBox(alignment: Alignment.centerLeft, fit: BoxFit.scaleDown,
-              child: Text(value, style: TextStyle(fontSize: 34, fontWeight: FontWeight.w900, color: warn ? kRed : col)))),
-            if (bar != null) LinearProgressIndicator(value: bar, minHeight: 4, color: col, backgroundColor: kDim),
-          ]),
-        ),
-      ),
-    );
+static void bleTask(void*) {
+  uint8_t p[BLE_PKT_LEN];
+  for (;;) {
+    vTaskDelay(pdMS_TO_TICKS(BLE_PERIOD_MS));
+    if (!bleConnected) continue;
+    memset(p, 0, sizeof(p));
+    p[0] = 1;
+    p[1] = car.state;
+    p[2] = car.proto;
+    p[3] = (carFresh() ? 1 : 0);
+    p[4] = bikeModel;
+    p[5] = imgState;
+    blePut(p, 6,  bleScale(car.rpm,   1));
+    blePut(p, 8,  bleScale(car.speed, 10));
+    blePut(p, 10, bleScale(car.ect,   10));
+    blePut(p, 12, bleScale(car.iat,   10));
+    blePut(p, 14, bleScale(car.eot,   10));
+    blePut(p, 16, bleScale(car.tps,   10));
+    blePut(p, 18, bleScale(car.map,   10));
+    blePut(p, 20, bleScale(car.batt,  100));
+    blePut(p, 22, bleScale(car.afr,   100));
+    blePut(p, 24, bleScale(car.ign,   10));
+    blePut(p, 26, bleScale(car.inj,   100));
+    blePut(p, 28, bleScale(car.o2v,   1000));
+    blePut(p, 30, bleScale(car.stft,  1000));
+    blePut(p, 32, bleScale(car.ltft,  1000));
+    bleData->setValue(p, BLE_PKT_LEN);
+    bleData->notify();
   }
 }
 
-// ---------- วงโค้งความเร็ว + เส้น RPM ----------
-class ArcPainter extends CustomPainter {
-  final double value, rpmFrac;
-  ArcPainter({required this.value, required this.rpmFrac});
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final r = math.min(size.width, size.height) / 2 - 8;
-    final center = Offset(size.width / 2, size.height / 2 + 6);
-    const start = math.pi * 0.75, sweep = math.pi * 1.5;
-    const n = 48;
-    for (int i = 0; i < n; i++) {
-      final a = start + sweep * i / n;
-      final on = i / n < value;
-      final p = Paint()
-        ..color = on ? (i / n > .85 ? kRed : const Color(0xFF3AA0FF)) : kDim
-        ..strokeWidth = 6
-        ..strokeCap = StrokeCap.butt;
-      canvas.drawLine(center + Offset(math.cos(a), math.sin(a)) * (r - 14), center + Offset(math.cos(a), math.sin(a)) * r, p);
-    }
-    // RPM bar ใต้ตัวเลข
-    final w = r * 1.1, y = center.dy + r * 0.62;
-    final bg = Paint()..color = kDim..strokeWidth = 6..strokeCap = StrokeCap.round;
-    final fg = Paint()..color = rpmFrac > .85 ? kRed : Colors.white..strokeWidth = 6..strokeCap = StrokeCap.round;
-    canvas.drawLine(Offset(center.dx - w / 2, y), Offset(center.dx + w / 2, y), bg);
-    if (rpmFrac > 0) canvas.drawLine(Offset(center.dx - w / 2, y), Offset(center.dx - w / 2 + w * rpmFrac, y), fg);
-  }
-
-  @override
-  bool shouldRepaint(ArcPainter o) => o.value != value || o.rpmFrac != rpmFrac;
+static void bleStart() {
+  NimBLEDevice::init(BLE_NAME);
+  NimBLEDevice::setMTU(185);
+  NimBLEDevice::setPower(ESP_PWR_LVL_P6);
+  bleServer = NimBLEDevice::createServer();
+  bleServer->setCallbacks(new BleSrvCb());
+  NimBLEService* svc = bleServer->createService(BLE_SVC_UUID);
+  bleData = svc->createCharacteristic(BLE_DATA_UUID, NIMBLE_PROPERTY::NOTIFY);
+  NimBLECharacteristic* cmd = svc->createCharacteristic(BLE_CMD_UUID, NIMBLE_PROPERTY::WRITE);
+  cmd->setCallbacks(new BleCmdCb());
+  NimBLECharacteristic* img = svc->createCharacteristic(BLE_IMG_UUID, NIMBLE_PROPERTY::WRITE);
+  img->setCallbacks(new BleImgCb());
+  imgQ = xQueueCreate(12, sizeof(ImgMsg));
+  xTaskCreate(imgTask, "img", 5120, NULL, 1, NULL);
+  svc->start();
+  NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
+  adv->addServiceUUID(BLE_SVC_UUID);
+  adv->setScanResponse(true);
+  adv->start();
+  xTaskCreatePinnedToCore(bleTask, "ble", 4096, NULL, 2, NULL, 0);
 }
