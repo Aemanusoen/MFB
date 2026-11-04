@@ -40,27 +40,111 @@ const kThemes = <AppTheme>[
   AppTheme('ชมพู', Color(0xFFFF4FD8), Color(0xFFFFAEEF)),
 ];
 
-class ThemeCtl extends ChangeNotifier {
-  static final ThemeCtl i = ThemeCtl._();
-  ThemeCtl._();
-  int idx = 0;
-  AppTheme get t => kThemes[idx];
+// ---------- ค่าคีย์ที่แสดงได้ (เหมือน TEST1 + TOP SPD) ----------
+const int kTps = 0, kTemp = 1, kBatt = 2, kAfr = 3, kInj = 4, kIgn = 5, kRpm = 6, kMap = 7,
+    kSpd = 8, kEot = 9, kIat = 10, kO2 = 11, kStft = 12, kLtft = 13, kTop = 14;
+
+class KeyDef {
+  final String name, unit;
+  final int dec;
+  const KeyDef(this.name, this.unit, this.dec);
+}
+
+const kKeys = <KeyDef>[
+  KeyDef('TPS', '%', 1), KeyDef('W.TEMP', '°C', 0), KeyDef('BATT', 'V', 1), KeyDef('AFR', '', 1),
+  KeyDef('INJ', 'ms', 2), KeyDef('IGN', '°BTDC', 1), KeyDef('RPM', 'rpm', 0), KeyDef('MAP', 'kPa', 0),
+  KeyDef('SPD', 'km/h', 0), KeyDef('EOT', '°C', 0), KeyDef('IAT', '°C', 0), KeyDef('O2', 'V', 2),
+  KeyDef('STFT', '', 3), KeyDef('LTFT', '', 3), KeyDef('TOP SPD', 'km/h', 0),
+];
+
+// สีค่าคงที่ (ไม่เปลี่ยนตามธีม)
+const kTpsBlue = Color(0xFF3D6BFF);
+const kBattRed = Color(0xFFFF3B3B);
+const kAfrLow = Color(0xFF2EB8FF); // < 13  ฟ้า
+const kAfrOk = Color(0xFF3CFF8A); // 13-14.7 เขียว
+const kAfrHigh = Color(0xFFFF3B3B); // > 14.7 แดง
+const kLogoRed = Color(0xFFFF2A2A);
+
+Color afrColor(double v) => v < 13.0 ? kAfrLow : (v <= 14.7 ? kAfrOk : kAfrHigh);
+
+/// สีไล่เฉดเขียว -> เหลือง -> แดง ตามตำแหน่งรอบเครื่อง เทียบกับ SHIFT RPM
+Color rpmColor(double rpm, int shift) {
+  final t = (rpm / math.max(1, shift)).clamp(0.0, 1.0).toDouble();
+  const g = Color(0xFF29E868), y = Color(0xFFFFD21F), r = Color(0xFFFF2A2A);
+  return t < 0.65 ? Color.lerp(g, y, t / 0.65)! : Color.lerp(y, r, (t - 0.65) / 0.35)!;
+}
+
+// ---------- การตั้งค่าที่บันทึกในเครื่อง ----------
+class Cfg extends ChangeNotifier {
+  static final Cfg i = Cfg._();
+  Cfg._();
+  int themeIdx = 0;
+  int shift = 10000; // SHIFT LIGHT RPM
+  int tempWarn = 105; // °C
+  bool speedGps = true; // true = GPS, false = ECU
+  List<int> main = [kTps, kAfr, kIgn, kTemp, kEot, kBatt, kIat]; // ซ้าย 3 + ขวา 4
+  List<int> grid = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+
+  AppTheme get t => kThemes[themeIdx];
+
+  List<int>? _parse(String? s, int len) {
+    if (s == null) return null;
+    final l = s.split(',').map((e) => int.tryParse(e)).toList();
+    if (l.length != len || l.any((e) => e == null || e < 0 || e >= kKeys.length)) return null;
+    return l.cast<int>();
+  }
 
   Future<void> load() async {
     try {
       final p = await SharedPreferences.getInstance();
       final v = p.getInt('theme') ?? 0;
-      idx = (v >= 0 && v < kThemes.length) ? v : 0;
+      themeIdx = (v >= 0 && v < kThemes.length) ? v : 0;
+      shift = (p.getInt('shift') ?? 10000).clamp(1000, 15000).toInt();
+      tempWarn = (p.getInt('tempWarn') ?? 105).clamp(60, 150).toInt();
+      speedGps = p.getBool('speedGps') ?? true;
+      main = _parse(p.getString('main'), 7) ?? main;
+      grid = _parse(p.getString('grid'), 12) ?? grid;
     } catch (_) {}
   }
 
-  Future<void> set(int v) async {
-    idx = v;
+  Future<void> _save() async {
     notifyListeners();
     try {
       final p = await SharedPreferences.getInstance();
-      await p.setInt('theme', v);
+      await p.setInt('theme', themeIdx);
+      await p.setInt('shift', shift);
+      await p.setInt('tempWarn', tempWarn);
+      await p.setBool('speedGps', speedGps);
+      await p.setString('main', main.join(','));
+      await p.setString('grid', grid.join(','));
     } catch (_) {}
+  }
+
+  Future<void> setTheme(int v) {
+    themeIdx = v;
+    return _save();
+  }
+
+  Future<void> addShift(int d) {
+    shift = (shift + d).clamp(1000, 15000).toInt();
+    return _save();
+  }
+
+  Future<void> addTemp(int d) {
+    tempWarn = (tempWarn + d).clamp(60, 150).toInt();
+    return _save();
+  }
+
+  Future<void> toggleSpeed() {
+    speedGps = !speedGps;
+    return _save();
+  }
+
+  Future<void> setSlot(List<int> arr, int idx, int key) {
+    final j = arr.indexOf(key);
+    if (j >= 0 && j != idx) arr[j] = arr[idx]; // ถ้าค่านี้อยู่ช่องอื่นแล้ว ให้สลับกัน (เหมือน TEST1)
+    arr[idx] = key;
+    return _save();
   }
 }
 
@@ -114,9 +198,30 @@ class GaugeController extends ChangeNotifier {
 
   bool get ecuLive => link == LinkState.connected && t.fresh;
 
-  /// ความเร็วที่แสดงกลางเกจ: ใช้ GPS เป็นหลัก ถ้าไม่มี GPS ใช้ค่าจาก ECU
-  double? get shownSpeed => demo ? t.speed : (gpsOk ? gpsSpeed : t.speed);
-  String get speedSrc => (!demo && gpsOk) ? 'GPS' : 'ECU';
+  /// ความเร็วกลางเกจ: สลับโหมด GPS / ECU ได้ (แตะที่ตัวเลขความเร็ว)
+  double? get shownSpeed => demo ? t.speed : (Cfg.i.speedGps ? (gpsOk ? gpsSpeed : null) : t.speed);
+  String get speedSrc => Cfg.i.speedGps ? 'GPS' : 'ECU';
+
+  double? keyVal(int k) {
+    switch (k) {
+      case kTps: return t.tps;
+      case kTemp: return t.ect;
+      case kBatt: return t.batt;
+      case kAfr: return t.afr;
+      case kInj: return t.inj;
+      case kIgn: return t.ign;
+      case kRpm: return t.rpm;
+      case kMap: return t.map;
+      case kSpd: return shownSpeed;
+      case kEot: return t.eot;
+      case kIat: return t.iat;
+      case kO2: return t.o2v;
+      case kStft: return t.stft;
+      case kLtft: return t.ltft;
+      case kTop: return topSpeed;
+    }
+    return null;
+  }
 
   Future<void> init() async {
     await WakelockPlus.enable();
@@ -153,24 +258,19 @@ class GaugeController extends ChangeNotifier {
     }
   }
 
-  String? mnStr(String k, int dec) => mm[k] == null ? null : mm[k]![0].toStringAsFixed(dec);
-  String? mxStr(String k, int dec) => mm[k] == null ? null : mm[k]![1].toStringAsFixed(dec);
+  // ยังไม่มีค่า / เพิ่งรีเซ็ต -> แสดง 0 (ไม่ซ่อน)
+  String mnStr(String k) => mm[k] == null ? '0' : mm[k]![0].toStringAsFixed(0);
+  String mxStr(String k) => mm[k] == null ? '0' : mm[k]![1].toStringAsFixed(0);
 
   void _track() {
     final s = shownSpeed;
     if (s != null && s > topSpeed) topSpeed = s;
     if (t.fresh || demo) {
       _mmUpdate('rpm', t.rpm, skipZero: true);
-      _mmUpdate('tps', t.tps);
-      _mmUpdate('afr', t.afr);
-      _mmUpdate('ign', t.ign);
-      _mmUpdate('ect', t.ect ?? t.eot);
-      _mmUpdate('iat', t.iat);
-      _mmUpdate('batt', t.batt);
     }
   }
 
-  void resetPeaks() {
+  void resetMinMax() {
     topSpeed = 0;
     mm.clear();
     notifyListeners();
@@ -366,7 +466,7 @@ class GaugeController extends ChangeNotifier {
 // ======================= UI =======================
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await ThemeCtl.i.load();
+  await Cfg.i.load();
   SystemChrome.setPreferredOrientations([DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]);
   SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
   runApp(const MfbProApp());
@@ -421,14 +521,11 @@ class _SplashPageState extends State<SplashPage> with SingleTickerProviderStateM
 
   @override
   Widget build(BuildContext context) {
-    final th = ThemeCtl.i.t;
+    final th = Cfg.i.t;
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(fit: StackFit.expand, children: [
-        FadeTransition(
-          opacity: fade,
-          child: Image.asset('assets/splash.jpg', fit: BoxFit.cover),
-        ),
+        FadeTransition(opacity: fade, child: Image.asset('assets/splash.jpg', fit: BoxFit.cover)),
         Positioned(
           left: 0, right: 0, bottom: 18,
           child: Center(
@@ -442,8 +539,7 @@ class _SplashPageState extends State<SplashPage> with SingleTickerProviderStateM
                   const SizedBox(height: 6),
                   ClipRRect(
                     borderRadius: BorderRadius.circular(3),
-                    child: LinearProgressIndicator(
-                      value: ac.value, minHeight: 5, color: th.c, backgroundColor: Colors.white12),
+                    child: LinearProgressIndicator(value: ac.value, minHeight: 5, color: th.c, backgroundColor: Colors.white12),
                   ),
                 ]),
               ),
@@ -455,7 +551,58 @@ class _SplashPageState extends State<SplashPage> with SingleTickerProviderStateM
   }
 }
 
-// ---------- หน้าเกจหลัก ----------
+// ---------- เลือกค่าที่จะแสดงในช่อง (เหมือนเมนู SELECT ของ TEST1) ----------
+Future<void> pickKey(BuildContext context, List<int> arr, int idx) {
+  final th = Cfg.i.t;
+  return showDialog<void>(
+    context: context,
+    builder: (dctx) => Dialog(
+      backgroundColor: Colors.transparent,
+      insetPadding: const EdgeInsets.all(12),
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 520),
+          child: Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: const Color(0xF2060606),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: th.c, width: 1.2),
+              boxShadow: [BoxShadow(color: th.c.withOpacity(0.4), blurRadius: 14)],
+            ),
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('SELECT', style: TextStyle(fontFamily: kFont, fontSize: 12, color: th.c)),
+              const SizedBox(height: 10),
+              Wrap(spacing: 8, runSpacing: 8, children: [
+                for (int k = 0; k < kKeys.length; k++)
+                  InkWell(
+                    onTap: () {
+                      Cfg.i.setSlot(arr, idx, k);
+                      Navigator.of(dctx).pop();
+                    },
+                    borderRadius: BorderRadius.circular(6),
+                    child: Container(
+                      width: 92,
+                      padding: const EdgeInsets.symmetric(vertical: 9),
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        color: arr[idx] == k ? th.c.withOpacity(0.3) : Colors.black45,
+                        border: Border.all(color: arr[idx] == k ? th.c : Colors.white24, width: arr[idx] == k ? 1.6 : 1),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Text(kKeys[k].name, style: const TextStyle(fontFamily: kFont, fontSize: 9)),
+                    ),
+                  ),
+              ]),
+            ]),
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+// ---------- หน้าเกจหลัก (2 หน้า: GAUGE / GRID) ----------
 class GaugePage extends StatefulWidget {
   const GaugePage({super.key});
   @override
@@ -464,6 +611,8 @@ class GaugePage extends StatefulWidget {
 
 class _GaugePageState extends State<GaugePage> {
   final c = GaugeController();
+  final pc = PageController();
+  int page = 0;
 
   void _rebuild() {
     if (mounted) setState(() {});
@@ -474,23 +623,25 @@ class _GaugePageState extends State<GaugePage> {
     super.initState();
     c.init();
     c.addListener(_rebuild);
-    ThemeCtl.i.addListener(_rebuild);
+    Cfg.i.addListener(_rebuild);
   }
 
   @override
   void dispose() {
-    ThemeCtl.i.removeListener(_rebuild);
+    Cfg.i.removeListener(_rebuild);
     c.removeListener(_rebuild);
     c.dispose();
+    pc.dispose();
     super.dispose();
   }
 
-  String _fmt(double? v, int dec) => v == null ? '--' : v.toStringAsFixed(dec);
-
   @override
   Widget build(BuildContext context) {
-    final th = ThemeCtl.i.t;
+    final cfg = Cfg.i;
+    final th = cfg.t;
     final t = c.t;
+    final blinkOn = (DateTime.now().millisecondsSinceEpoch ~/ 280) % 2 == 0;
+    final shiftOn = t.rpm != null && t.rpm! >= cfg.shift;
     final linkTxt = switch (c.link) {
       LinkState.idle => 'OFFLINE',
       LinkState.scanning => 'SCANNING',
@@ -509,10 +660,13 @@ class _GaugePageState extends State<GaugePage> {
             padding: const EdgeInsets.fromLTRB(10, 6, 10, 4),
             child: Column(children: [
               Row(children: [
-                Text('MFB-PRO',
-                    style: TextStyle(
-                        fontFamily: kFont, fontSize: 17, color: th.c,
-                        shadows: [Shadow(color: th.c, blurRadius: 10)])),
+                Text.rich(
+                  TextSpan(children: [
+                    const TextSpan(text: 'MFB-', style: TextStyle(color: kLogoRed, shadows: [Shadow(color: kLogoRed, blurRadius: 10)])),
+                    TextSpan(text: 'PRO', style: TextStyle(color: th.c, shadows: [Shadow(color: th.c, blurRadius: 10)])),
+                  ]),
+                  style: const TextStyle(fontFamily: kFont, fontSize: 17),
+                ),
                 const SizedBox(width: 12),
                 Expanded(
                   child: SingleChildScrollView(
@@ -535,40 +689,138 @@ class _GaugePageState extends State<GaugePage> {
               ]),
               const SizedBox(height: 6),
               Expanded(
-                child: Row(children: [
-                  SizedBox(
-                    width: 168,
-                    child: Column(children: [
-                      Expanded(child: StatTile(th: th, label: 'TPS', unit: '%', value: _fmt(t.tps, 0), mn: c.mnStr('tps', 0), mx: c.mxStr('tps', 0))),
-                      Expanded(child: StatTile(th: th, label: 'AFR', unit: 'O2', value: _fmt(t.afr, 1), mn: c.mnStr('afr', 1), mx: c.mxStr('afr', 1))),
-                      Expanded(child: StatTile(th: th, label: 'IGN', unit: '°BTDC', value: _fmt(t.ign, 1), mn: c.mnStr('ign', 1), mx: c.mxStr('ign', 1))),
-                    ]),
+                child: Padding(
+                  padding: const EdgeInsets.only(bottom: 14),
+                  child: PageView(
+                    controller: pc,
+                    onPageChanged: (i) => setState(() => page = i),
+                    children: [_mainPage(th, blinkOn), _gridPage(th, blinkOn)],
                   ),
-                  const SizedBox(width: 8),
-                  Expanded(child: LayoutBuilder(builder: (_, cs) => _center(cs, th))),
-                  const SizedBox(width: 8),
-                  SizedBox(
-                    width: 168,
-                    child: Column(children: [
-                      Expanded(child: StatTile(th: th, label: 'ECT', unit: '°C', value: _fmt(t.ect ?? t.eot, 0), mn: c.mnStr('ect', 0), mx: c.mxStr('ect', 0), warn: (t.ect ?? 0) > 105)),
-                      Expanded(child: StatTile(th: th, label: 'IAT', unit: '°C', value: _fmt(t.iat, 0), mn: c.mnStr('iat', 0), mx: c.mxStr('iat', 0))),
-                      Expanded(child: StatTile(th: th, label: 'BATTERY', unit: 'V', value: _fmt(t.batt, 1), mn: c.mnStr('batt', 1), mx: c.mxStr('batt', 1), warn: t.batt != null && t.batt! < 11.8)),
-                      Expanded(child: StatTile(th: th, label: 'TOP SPEED', unit: 'KM/H', value: c.topSpeed.toStringAsFixed(1), footer: 'TAP = RESET', onTap: c.resetPeaks)),
-                    ]),
-                  ),
-                ]),
+                ),
               ),
             ]),
+          ),
+        ),
+        // ตัวบอกหน้า: สี่เหลี่ยมแนวนอน + ชื่อหน้า
+        Positioned(
+          left: 0, right: 0, bottom: 3,
+          child: IgnorePointer(
+            child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+              for (int i = 0; i < 2; i++)
+                Container(
+                  margin: const EdgeInsets.symmetric(horizontal: 3),
+                  width: i == page ? 24 : 14, height: 5,
+                  decoration: BoxDecoration(
+                    color: i == page ? th.c : Colors.white30,
+                    borderRadius: BorderRadius.circular(1.5),
+                    boxShadow: i == page ? [BoxShadow(color: th.c, blurRadius: 6)] : null,
+                  ),
+                ),
+              const SizedBox(width: 8),
+              Text(page == 0 ? 'GAUGE' : 'GRID', style: const TextStyle(fontFamily: kFont, fontSize: 7, color: Colors.white54)),
+            ]),
+          ),
+        ),
+        // แสงเตือน SHIFT: แดงฟุ้งจากขอบทั้ง 4 เข้ากลางจอ กระพริบ
+        Positioned.fill(
+          child: IgnorePointer(
+            child: AnimatedOpacity(
+              opacity: shiftOn ? (blinkOn ? 1.0 : 0.15) : 0.0,
+              duration: const Duration(milliseconds: 120),
+              child: CustomPaint(painter: EdgeGlowPainter()),
+            ),
           ),
         ),
       ]),
     );
   }
 
-  // เกจกลาง: ความเร็ว GPS อยู่กลางเกจ, RPM อยู่ด้านล่างเกจ
+  // ----- หน้า 1: เกจ -----
+  Widget _mainPage(AppTheme th, bool blinkOn) {
+    final m = Cfg.i.main;
+    return Row(children: [
+      SizedBox(
+        width: 168,
+        child: Column(children: [
+          for (int i = 0; i < 3; i++) Expanded(child: _slotTile(m[i], () => pickKey(context, m, i), blinkOn)),
+        ]),
+      ),
+      const SizedBox(width: 8),
+      Expanded(child: LayoutBuilder(builder: (_, cs) => _center(cs, th))),
+      const SizedBox(width: 8),
+      SizedBox(
+        width: 168,
+        child: Column(children: [
+          for (int i = 3; i < 7; i++) Expanded(child: _slotTile(m[i], () => pickKey(context, m, i), blinkOn)),
+        ]),
+      ),
+    ]);
+  }
+
+  // ----- หน้า 2: GRID 12 ช่อง -----
+  Widget _gridPage(AppTheme th, bool blinkOn) {
+    final g = Cfg.i.grid;
+    return Column(children: [
+      for (int r = 0; r < 3; r++)
+        Expanded(
+          child: Row(children: [
+            for (int k = 0; k < 4; k++)
+              Expanded(
+                child: Padding(
+                  padding: EdgeInsets.only(right: k < 3 ? 6 : 0),
+                  child: _slotTile(g[r * 4 + k], () => pickKey(context, g, r * 4 + k), blinkOn, vs: 36),
+                ),
+              ),
+          ]),
+        ),
+    ]);
+  }
+
+  /// สร้างช่องค่าจากคีย์: สี/บาร์/กระพริบตามกฎ
+  Widget _slotTile(int key, VoidCallback onTap, bool blinkOn, {double vs = 30}) {
+    final kd = kKeys[key];
+    final cfg = Cfg.i;
+    final v = c.keyVal(key);
+    final s = v == null ? '--' : v.toStringAsFixed(kd.dec);
+    Color? vc;
+    double? bar;
+    Color Function(double)? bc;
+    bool alert = false;
+    switch (key) {
+      case kTps:
+        vc = kTpsBlue;
+        bar = v == null ? 0.0 : (v / 100).clamp(0.0, 1.0).toDouble();
+        bc = (_) => kTpsBlue;
+        break;
+      case kBatt:
+        vc = kBattRed;
+        break;
+      case kAfr:
+        final col = v == null ? kAfrOk : afrColor(v);
+        if (v != null) vc = col;
+        bar = v == null ? 0.0 : ((v - 10) / 8).clamp(0.0, 1.0).toDouble();
+        bc = (_) => col;
+        break;
+      case kRpm:
+        bar = v == null ? 0.0 : (v / kMaxRpm).clamp(0.0, 1.0).toDouble();
+        bc = (p) => rpmColor(p * kMaxRpm, cfg.shift);
+        break;
+      case kTemp:
+      case kEot:
+        alert = v != null && v >= cfg.tempWarn;
+        break;
+    }
+    return StatTile(
+      th: cfg.t, label: kd.name, unit: kd.unit, value: s, valueColor: vc,
+      alert: alert, blinkOn: blinkOn, bar: bar, barColor: bc, onTap: onTap, valueSize: vs,
+    );
+  }
+
+  // เกจกลาง: ความเร็ว (แตะสลับ GPS/ECU) อยู่กลางเกจ, RPM อยู่ใต้เกจ
   Widget _center(BoxConstraints cs, AppTheme th) {
+    final cfg = Cfg.i;
     final w = cs.maxWidth, h = cs.maxHeight;
-    const tileH = 66.0;
+    const tileH = 80.0;
     final r = math.max(60.0, math.min(w / 2 - 4, (h - tileH - 8) / 1.74));
     final cx = w / 2, cy = r + 4;
     final rpm = c.t.rpm;
@@ -581,29 +833,39 @@ class _GaugePageState extends State<GaugePage> {
         child: TweenAnimationBuilder<double>(
           tween: Tween<double>(end: frac),
           duration: const Duration(milliseconds: 140),
-          builder: (_, v, __) => CustomPaint(painter: GaugePainter(frac: v, r: r, th: th)),
+          builder: (_, v, __) => CustomPaint(painter: GaugePainter(frac: v, r: r, th: th, shift: cfg.shift)),
         ),
       ),
       Positioned(
         left: cx - r * 0.5, width: r, top: cy - r * 0.34, height: r * 0.72,
-        child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-          Expanded(
-            child: FittedBox(
-              fit: BoxFit.scaleDown,
-              child: Text(sp == null ? '--' : sp.toStringAsFixed(0),
-                  style: TextStyle(
-                      fontFamily: kFont, fontSize: 60, color: Colors.white,
-                      shadows: [Shadow(color: th.c, blurRadius: 14), Shadow(color: th.c.withOpacity(0.7), blurRadius: 4)])),
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: cfg.toggleSpeed,
+          child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+            Expanded(
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Text(sp == null ? '--' : sp.toStringAsFixed(0),
+                    style: TextStyle(
+                        fontFamily: kFont, fontSize: 60, color: Colors.white,
+                        shadows: [Shadow(color: th.c, blurRadius: 14), Shadow(color: th.c.withOpacity(0.7), blurRadius: 4)])),
+              ),
             ),
-          ),
-          Text('km/h · ${c.speedSrc}', style: TextStyle(fontSize: math.max(10.0, r * 0.085), color: th.c2, fontWeight: FontWeight.bold)),
-        ]),
+            Row(mainAxisSize: MainAxisSize.min, children: [
+              Text('km/h · ${c.speedSrc}', style: TextStyle(fontSize: math.max(10.0, r * 0.085), color: th.c2, fontWeight: FontWeight.bold)),
+              const SizedBox(width: 3),
+              Icon(Icons.swap_horiz, size: math.max(12.0, r * 0.1), color: th.c2),
+            ]),
+          ]),
+        ),
       ),
       Positioned(
         left: cx - tileW / 2, width: tileW, top: cy + 0.74 * r, height: tileH,
         child: StatTile(
-          th: th, label: 'RPM', unit: 'x1000', value: rpm == null ? '--' : rpm.toStringAsFixed(0),
-          mn: c.mnStr('rpm', 0), mx: c.mxStr('rpm', 0), bottomMargin: 0, valueSize: 26),
+          th: th, label: 'RPM', unit: 'rpm', value: rpm == null ? '--' : rpm.toStringAsFixed(0),
+          bar: frac, barColor: (p) => rpmColor(p * kMaxRpm, cfg.shift),
+          mn: c.mnStr('rpm'), mx: c.mxStr('rpm'), bottomMargin: 0, valueSize: 26,
+        ),
       ),
     ]);
   }
@@ -611,8 +873,7 @@ class _GaugePageState extends State<GaugePage> {
   Widget _chip(String s, Color col) => Container(
         margin: const EdgeInsets.only(right: 6),
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        decoration: BoxDecoration(
-            color: Colors.black54, border: Border.all(color: Colors.white24), borderRadius: BorderRadius.circular(6)),
+        decoration: BoxDecoration(color: Colors.black54, border: Border.all(color: Colors.white24), borderRadius: BorderRadius.circular(6)),
         child: Row(mainAxisSize: MainAxisSize.min, children: [
           Container(width: 7, height: 7, decoration: BoxDecoration(color: col, shape: BoxShape.circle, boxShadow: [BoxShadow(color: col, blurRadius: 5)])),
           const SizedBox(width: 6),
@@ -651,67 +912,129 @@ class _GaugePageState extends State<GaugePage> {
       );
 }
 
-// ---------- กรอบแสดงค่า: เส้นขอบบางเรืองแสง + ขีดสั้นมุมซ้ายบน + ▼ต่ำสุด ▲สูงสุด ----------
+// ---------- แสงเตือนแดงจากขอบ 4 ด้าน ----------
+class EdgeGlowPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final d = math.min(size.width, size.height) * 0.32;
+    void edge(Rect r, Alignment a, Alignment b) {
+      canvas.drawRect(
+          r,
+          Paint()
+            ..shader = LinearGradient(begin: a, end: b, colors: const [Color(0xE6FF1A1A), Color(0x00FF1A1A)]).createShader(r));
+    }
+
+    edge(Rect.fromLTWH(0, 0, size.width, d), Alignment.topCenter, Alignment.bottomCenter);
+    edge(Rect.fromLTWH(0, size.height - d, size.width, d), Alignment.bottomCenter, Alignment.topCenter);
+    edge(Rect.fromLTWH(0, 0, d, size.height), Alignment.centerLeft, Alignment.centerRight);
+    edge(Rect.fromLTWH(size.width - d, 0, d, size.height), Alignment.centerRight, Alignment.centerLeft);
+  }
+
+  @override
+  bool shouldRepaint(EdgeGlowPainter o) => false;
+}
+
+// ---------- บาร์แท่งเซกเมนต์ ----------
+class SegBar extends StatelessWidget {
+  final double frac;
+  final Color Function(double) color;
+  final int n;
+  const SegBar({super.key, required this.frac, required this.color, this.n = 18});
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 6,
+      child: Row(children: [
+        for (int i = 0; i < n; i++)
+          Expanded(
+            child: Builder(builder: (_) {
+              final pos = (i + 0.5) / n;
+              final lit = pos <= frac;
+              final col = color(pos);
+              return Container(
+                margin: const EdgeInsets.symmetric(horizontal: 1),
+                decoration: BoxDecoration(
+                  color: lit ? col : Colors.white.withOpacity(0.12),
+                  borderRadius: BorderRadius.circular(1.5),
+                  boxShadow: lit ? [BoxShadow(color: col.withOpacity(0.6), blurRadius: 4)] : null,
+                ),
+              );
+            }),
+          ),
+      ]),
+    );
+  }
+}
+
+// ---------- กรอบแสดงค่า ----------
 class StatTile extends StatelessWidget {
   final AppTheme th;
   final String label, unit, value;
-  final String? mn, mx, footer;
-  final bool warn;
+  final Color? valueColor;
+  final bool alert, blinkOn;
+  final double? bar;
+  final Color Function(double)? barColor;
+  final String? mn, mx;
   final VoidCallback? onTap;
-  final double bottomMargin;
-  final double valueSize;
+  final double bottomMargin, valueSize;
   const StatTile({
     super.key, required this.th, required this.label, required this.unit, required this.value,
-    this.mn, this.mx, this.footer, this.warn = false, this.onTap, this.bottomMargin = 6, this.valueSize = 30,
+    this.valueColor, this.alert = false, this.blinkOn = false, this.bar, this.barColor,
+    this.mn, this.mx, this.onTap, this.bottomMargin = 6, this.valueSize = 30,
   });
 
   @override
   Widget build(BuildContext context) {
-    final col = warn ? kBad : th.c;
-    return LayoutBuilder(builder: (_, cs) {
-      final tall = cs.maxHeight >= 60;
-      return GestureDetector(
-        onTap: onTap,
-        child: Container(
-          margin: EdgeInsets.only(bottom: bottomMargin),
-          decoration: BoxDecoration(
-            color: const Color(0xCC060606),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: col.withOpacity(0.85), width: 1.1),
-            boxShadow: [BoxShadow(color: col.withOpacity(0.35), blurRadius: 10)],
-          ),
-          child: Stack(children: [
-            Positioned(
-              top: 0, left: 12,
-              child: Container(
-                width: 38, height: 3,
-                decoration: BoxDecoration(
-                  color: col,
-                  borderRadius: const BorderRadius.vertical(bottom: Radius.circular(2)),
-                  boxShadow: [BoxShadow(color: col, blurRadius: 6)],
-                ),
+    final active = alert && blinkOn; // กรอบกระพริบแดงเมื่อค่าเกินที่ตั้ง
+    final col = active ? kBad : th.c;
+    final vcol = alert ? kBad : (valueColor ?? Colors.white);
+    final glow = alert ? kBad : (valueColor ?? th.c);
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        margin: EdgeInsets.only(bottom: bottomMargin),
+        decoration: BoxDecoration(
+          color: const Color(0xCC060606),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: col.withOpacity(active ? 1.0 : 0.85), width: active ? 2.0 : 1.1),
+          boxShadow: [BoxShadow(color: col.withOpacity(active ? 0.85 : 0.35), blurRadius: active ? 18 : 10)],
+        ),
+        child: Stack(children: [
+          Positioned(
+            top: 0, left: 12,
+            child: Container(
+              width: 38, height: 3,
+              decoration: BoxDecoration(
+                color: col,
+                borderRadius: const BorderRadius.vertical(bottom: Radius.circular(2)),
+                boxShadow: [BoxShadow(color: col, blurRadius: 6)],
               ),
             ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(10, 7, 10, 4),
-              child: Column(children: [
-                Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                  Flexible(child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontFamily: kFont, fontSize: 9, color: Colors.white54))),
-                  Text(unit, style: const TextStyle(fontFamily: kFont, fontSize: 8, color: Colors.white38)),
-                ]),
-                Expanded(
-                  child: Center(
-                    child: FittedBox(
-                      fit: BoxFit.scaleDown,
-                      child: Text(value,
-                          style: TextStyle(
-                              fontFamily: kFont, fontSize: valueSize, color: Colors.white,
-                              shadows: [Shadow(color: col, blurRadius: 9), Shadow(color: col.withOpacity(0.6), blurRadius: 3)])),
-                    ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(10, 7, 10, 5),
+            child: Column(children: [
+              Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                Flexible(child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontFamily: kFont, fontSize: 9, color: Colors.white54))),
+                Text(unit, style: const TextStyle(fontFamily: kFont, fontSize: 8, color: Colors.white38)),
+              ]),
+              Expanded(
+                child: Center(
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Text(value,
+                        style: TextStyle(
+                            fontFamily: kFont, fontSize: valueSize, color: vcol,
+                            shadows: [Shadow(color: glow, blurRadius: 9), Shadow(color: glow.withOpacity(0.6), blurRadius: 3)])),
                   ),
                 ),
-                if (tall && mn != null && mx != null)
-                  Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+              ),
+              if (bar != null && barColor != null) SegBar(frac: bar!, color: barColor!),
+              if (mn != null && mx != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 3),
+                  child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
                     Text.rich(TextSpan(children: [
                       const TextSpan(text: '▼ ', style: TextStyle(color: kGreen, fontSize: 9)),
                       TextSpan(text: mn!, style: const TextStyle(color: kGreen, fontSize: 12)),
@@ -720,15 +1043,13 @@ class StatTile extends StatelessWidget {
                       const TextSpan(text: '▲ ', style: TextStyle(color: kBad, fontSize: 9)),
                       TextSpan(text: mx!, style: const TextStyle(color: kBad, fontSize: 12)),
                     ])),
-                  ])
-                else if (tall && footer != null)
-                  Text(footer!, style: const TextStyle(fontSize: 9, color: Colors.white38)),
-              ]),
-            ),
-          ]),
-        ),
-      );
-    });
+                  ]),
+                ),
+            ]),
+          ),
+        ]),
+      ),
+    );
   }
 }
 
@@ -736,7 +1057,10 @@ class StatTile extends StatelessWidget {
 class GaugePainter extends CustomPainter {
   final double frac, r;
   final AppTheme th;
-  GaugePainter({required this.frac, required this.r, required this.th});
+  final int shift;
+  GaugePainter({required this.frac, required this.r, required this.th, required this.shift});
+
+  static const zoneRed = Color(0x59FF2A2A); // แดงโปร่งใสตายตัว (ท้ายแท่ง)
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -749,16 +1073,15 @@ class GaugePainter extends CustomPainter {
 
     for (int i = 0; i < n; i++) {
       final pos = (i + 0.5) / n;
-      final inZone = pos * kMaxRpm >= kZoneRpm;
+      final inZone = pos * kMaxRpm >= shift;
       final lit = pos <= frac;
       final a0 = start + seg * i + seg * 0.1;
-      final col = lit
-          ? (inZone ? th.c2 : th.c)
-          : (inZone ? th.c.withOpacity(0.30) : Colors.white.withOpacity(0.13));
+      final segCol = rpmColor(pos * kMaxRpm, shift); // เขียว -> เหลือง -> แดง
+      final col = lit ? segCol : (inZone ? zoneRed : Colors.white.withOpacity(0.13));
       if (lit) {
         canvas.drawArc(rect, a0, seg * 0.8, false,
             Paint()
-              ..color = th.c.withOpacity(0.7)
+              ..color = segCol.withOpacity(0.7)
               ..style = PaintingStyle.stroke
               ..strokeWidth = thick
               ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6));
@@ -770,7 +1093,7 @@ class GaugePainter extends CustomPainter {
             ..strokeWidth = thick);
     }
 
-    // วงบางด้านใน + โซนเรดไลน์
+    // วงบางด้านใน + โซนแดงเริ่มที่ SHIFT RPM
     final r2 = r * 0.80;
     final rect2 = Rect.fromCircle(center: c, radius: r2);
     canvas.drawArc(rect2, start, sweep, false,
@@ -778,27 +1101,29 @@ class GaugePainter extends CustomPainter {
           ..color = Colors.white.withOpacity(0.2)
           ..style = PaintingStyle.stroke
           ..strokeWidth = 1.5);
-    final zs = kZoneRpm / kMaxRpm;
-    canvas.drawArc(rect2, start + sweep * zs, sweep * (1 - zs), false,
-        Paint()
-          ..color = th.c
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 2.6
-          ..maskFilter = const MaskFilter.blur(BlurStyle.solid, 2));
+    final zs = (shift / kMaxRpm).clamp(0.0, 1.0).toDouble();
+    if (zs < 1.0) {
+      canvas.drawArc(rect2, start + sweep * zs, sweep * (1 - zs), false,
+          Paint()
+            ..color = const Color(0xFFFF2A2A)
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 2.6
+            ..maskFilter = const MaskFilter.blur(BlurStyle.solid, 2));
+    }
 
     // ขีดและตัวเลข 0..15
     for (int k = 0; k <= 15; k++) {
       final ang = start + sweep * k / 15;
       final dir = Offset(math.cos(ang), math.sin(ang));
-      final zone = k * 1000 >= kZoneRpm;
+      final zone = k * 1000 >= shift;
       canvas.drawLine(c + dir * (r2 - r * 0.05), c + dir * r2,
           Paint()
-            ..color = zone ? th.c : Colors.white70
+            ..color = zone ? const Color(0xFFFF2A2A) : Colors.white70
             ..strokeWidth = 1.6);
       final tp = TextPainter(
         text: TextSpan(
             text: '$k',
-            style: TextStyle(fontFamily: kFont, fontSize: r * 0.072, color: zone ? th.c2 : Colors.white.withOpacity(0.9))),
+            style: TextStyle(fontFamily: kFont, fontSize: r * 0.072, color: zone ? const Color(0xFFFF7A7A) : Colors.white.withOpacity(0.9))),
         textDirection: TextDirection.ltr,
       )..layout();
       final pos = c + dir * (r * 0.64);
@@ -823,7 +1148,55 @@ class GaugePainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(GaugePainter o) => o.frac != frac || o.r != r || o.th != th;
+  bool shouldRepaint(GaugePainter o) => o.frac != frac || o.r != r || o.th != th || o.shift != shift;
+}
+
+// ---------- ปุ่ม - / + กดค้างเพื่อเพิ่ม/ลดต่อเนื่อง ----------
+class StepBtn extends StatefulWidget {
+  final String label;
+  final VoidCallback onStep;
+  final AppTheme th;
+  const StepBtn({super.key, required this.label, required this.onStep, required this.th});
+  @override
+  State<StepBtn> createState() => _StepBtnState();
+}
+
+class _StepBtnState extends State<StepBtn> {
+  Timer? _t;
+
+  void _stop() {
+    _t?.cancel();
+    _t = null;
+  }
+
+  @override
+  void dispose() {
+    _stop();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: widget.onStep,
+      onLongPressStart: (_) {
+        widget.onStep();
+        _t = Timer.periodic(const Duration(milliseconds: 90), (_) => widget.onStep());
+      },
+      onLongPressEnd: (_) => _stop(),
+      onLongPressCancel: _stop,
+      child: Container(
+        width: 38, height: 34,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: Colors.black45,
+          border: Border.all(color: widget.th.c, width: 1.4),
+          borderRadius: BorderRadius.circular(6),
+        ),
+        child: Text(widget.label, style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: widget.th.c, height: 1.1)),
+      ),
+    );
+  }
 }
 
 // ---------- หน้า SETTING ----------
@@ -848,13 +1221,13 @@ class _SettingsPageState extends State<SettingsPage> {
   @override
   void initState() {
     super.initState();
-    ThemeCtl.i.addListener(_rebuild);
+    Cfg.i.addListener(_rebuild);
     widget.c.addListener(_rebuild);
   }
 
   @override
   void dispose() {
-    ThemeCtl.i.removeListener(_rebuild);
+    Cfg.i.removeListener(_rebuild);
     widget.c.removeListener(_rebuild);
     super.dispose();
   }
@@ -926,7 +1299,8 @@ class _SettingsPageState extends State<SettingsPage> {
 
   @override
   Widget build(BuildContext context) {
-    final th = ThemeCtl.i.t;
+    final cfg = Cfg.i;
+    final th = cfg.t;
     final connected = widget.c.link == LinkState.connected;
     return Scaffold(
       backgroundColor: Colors.black,
@@ -944,14 +1318,30 @@ class _SettingsPageState extends State<SettingsPage> {
               Expanded(
                 child: SingleChildScrollView(
                   child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    // ----- ธีมสี -----
                     Expanded(
-                      child: _panel(th, 'ธีมสี', Wrap(spacing: 14, runSpacing: 14, children: [
-                        for (int i = 0; i < kThemes.length; i++) _themeDot(i),
-                      ])),
+                      child: Column(children: [
+                        _panel(th, 'ธีมสี', Wrap(spacing: 14, runSpacing: 14, children: [
+                          for (int i = 0; i < kThemes.length; i++) _themeDot(i),
+                        ])),
+                        const SizedBox(height: 12),
+                        _panel(
+                          th,
+                          'แจ้งเตือน',
+                          Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                            _stepper('SHIFT LIGHT RPM', '${cfg.shift}', () => cfg.addShift(-1000), () => cfg.addShift(1000), th),
+                            const SizedBox(height: 12),
+                            _stepper('TEMP', '${cfg.tempWarn} °C', () => cfg.addTemp(-1), () => cfg.addTemp(1), th),
+                            const SizedBox(height: 14),
+                            _action('RESET MIN/MAX', Icons.refresh, th, () {
+                              widget.c.resetMinMax();
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(duration: Duration(seconds: 1), content: Text('รีเซ็ตค่าต่ำสุด/สูงสุดแล้ว')));
+                            }),
+                          ]),
+                        ),
+                      ]),
                     ),
                     const SizedBox(width: 12),
-                    // ----- โลโก้บอร์ด -----
                     Expanded(
                       child: _panel(
                         th,
@@ -992,8 +1382,7 @@ class _SettingsPageState extends State<SettingsPage> {
                               padding: const EdgeInsets.only(top: 8),
                               child: LinearProgressIndicator(value: progress, color: th.c, backgroundColor: Colors.white12, minHeight: 5),
                             ),
-                          if (msg != null)
-                            Padding(padding: const EdgeInsets.only(top: 8), child: Text(msg!, style: const TextStyle(fontSize: 12))),
+                          if (msg != null) Padding(padding: const EdgeInsets.only(top: 8), child: Text(msg!, style: const TextStyle(fontSize: 12))),
                         ]),
                       ),
                     ),
@@ -1007,7 +1396,29 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
+  Widget _stepper(String label, String value, VoidCallback dec, VoidCallback inc, AppTheme th) => Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label, style: const TextStyle(fontFamily: kFont, fontSize: 10, color: Colors.white70)),
+          const SizedBox(height: 6),
+          Row(children: [
+            StepBtn(label: '−', onStep: dec, th: th),
+            const SizedBox(width: 10),
+            SizedBox(
+              width: 110,
+              child: Center(
+                child: Text(value,
+                    style: TextStyle(fontFamily: kFont, fontSize: 17, color: Colors.white, shadows: [Shadow(color: th.c, blurRadius: 9)])),
+              ),
+            ),
+            const SizedBox(width: 10),
+            StepBtn(label: '+', onStep: inc, th: th),
+          ]),
+        ],
+      );
+
   Widget _panel(AppTheme th, String title, Widget child) => Container(
+        width: double.infinity,
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
           color: const Color(0xCC060606),
@@ -1024,9 +1435,9 @@ class _SettingsPageState extends State<SettingsPage> {
 
   Widget _themeDot(int i) {
     final t = kThemes[i];
-    final sel = ThemeCtl.i.idx == i;
+    final sel = Cfg.i.themeIdx == i;
     return GestureDetector(
-      onTap: () => ThemeCtl.i.set(i),
+      onTap: () => Cfg.i.setTheme(i),
       child: Column(mainAxisSize: MainAxisSize.min, children: [
         Container(
           width: 44, height: 44,
@@ -1051,11 +1462,7 @@ class _SettingsPageState extends State<SettingsPage> {
           borderRadius: BorderRadius.circular(6),
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-            decoration: BoxDecoration(
-              color: Colors.black45,
-              border: Border.all(color: th.c, width: 1.3),
-              borderRadius: BorderRadius.circular(6),
-            ),
+            decoration: BoxDecoration(color: Colors.black45, border: Border.all(color: th.c, width: 1.3), borderRadius: BorderRadius.circular(6)),
             child: Row(mainAxisSize: MainAxisSize.min, children: [
               Icon(ic, size: 16, color: th.c),
               const SizedBox(width: 6),
