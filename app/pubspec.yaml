@@ -1,7 +1,7 @@
 name: mfb_pro
 description: MFB-PRO smart gauge (BLE client for ESP32 K-Line gauge)
 publish_to: none
-version: 1.0.0+1
+version: 1.1.0+2
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
@@ -13,6 +13,8 @@ dependencies:
   geolocator: ^12.0.0
   permission_handler: ^11.3.1
   wakelock_plus: ^1.2.8
+  shared_preferences: ^2.2.3
+  image_picker: ^1.1.2
 
 dev_dependencies:
   flutter_launcher_icons: ^0.14.1
@@ -26,3 +28,10 @@ flutter_launcher_icons:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/bg.jpg
+    - assets/splash.jpg
+  fonts:
+    - family: Ethnocentric
+      fonts:
+        - asset: assets/fonts/ethnocentric_rg.ttf
