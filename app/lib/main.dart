@@ -427,10 +427,7 @@ class _SplashPageState extends State<SplashPage> with SingleTickerProviderStateM
       body: Stack(fit: StackFit.expand, children: [
         FadeTransition(
           opacity: fade,
-          child: Padding(
-            padding: const EdgeInsets.only(bottom: 40),
-            child: Image.asset('assets/splash.jpg', fit: BoxFit.contain),
-          ),
+          child: Image.asset('assets/splash.jpg', fit: BoxFit.cover),
         ),
         Positioned(
           left: 0, right: 0, bottom: 18,
