@@ -70,6 +70,14 @@ jobs:
 
       - run: flutter pub get
 
+      - name: Generate launcher icon (ถ้ามี app/assets/icon.png)
+        run: |
+          if [ -f assets/icon.png ]; then
+            dart run flutter_launcher_icons
+          else
+            echo "no assets/icon.png - using default icon"
+          fi
+
       - name: Build APK
         run: flutter build apk --release
 
