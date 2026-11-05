@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
+import 'package:flutter/foundation.dart' show defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
@@ -193,8 +194,10 @@ class GaugeController extends ChangeNotifier {
   BluetoothDevice? _dev;
   BluetoothCharacteristic? _cmd, _imgCh;
   StreamSubscription? _scanSub, _dataSub, _connSub, _gpsSub;
-  Timer? _demoTimer, _retryTimer;
+  Timer? _demoTimer, _retryTimer, _gpsWatch;
   bool _auto = false;
+  int _gpsSentMs = 0, _gpsLastMs = 0;
+  bool _logoBusy = false;
 
   bool get ecuLive => link == LinkState.connected && t.fresh;
 
@@ -232,17 +235,48 @@ class GaugeController extends ChangeNotifier {
     try {
       final perm = await Geolocator.requestPermission();
       if (perm == LocationPermission.denied || perm == LocationPermission.deniedForever) return;
-      _gpsSub = Geolocator.getPositionStream(
-        locationSettings: const LocationSettings(accuracy: LocationAccuracy.best, distanceFilter: 0),
-      ).listen((p) {
+      // Android: ใช้ GPS ตรง (LocationManager) และขอทุก 200 ms -> ได้ความเร็วเร็วที่สุดเท่าที่ชิป GPS ให้ (ปกติ ~1 Hz ขึ้นไป)
+      final LocationSettings ls = defaultTargetPlatform == TargetPlatform.android
+          ? AndroidSettings(
+              accuracy: LocationAccuracy.best,
+              distanceFilter: 0,
+              intervalDuration: const Duration(milliseconds: 200),
+              forceLocationManager: true,
+            )
+          : const LocationSettings(accuracy: LocationAccuracy.best, distanceFilter: 0);
+      _gpsSub = Geolocator.getPositionStream(locationSettings: ls).listen((p) {
         gpsOk = true;
-        gpsSpeed = math.max(0, p.speed * 3.6);
+        _gpsLastMs = DateTime.now().millisecondsSinceEpoch;
+        gpsSpeed = math.max(0.0, p.speed * 3.6);
         _track();
+        _sendGps();
         notifyListeners();
       }, onError: (_) {
         gpsOk = false;
         notifyListeners();
       });
+      // ถ้าไม่มีข้อมูล GPS เกิน 4 วินาที ถือว่าสัญญาณหาย
+      _gpsWatch?.cancel();
+      _gpsWatch = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (gpsOk && DateTime.now().millisecondsSinceEpoch - _gpsLastMs > 4000) {
+          gpsOk = false;
+          notifyListeners();
+        }
+      });
+    } catch (_) {}
+  }
+
+  /// ส่งความเร็ว GPS ไปบอร์ด TEST1: [3][u16 km/h x10] (ไม่รอตอบกลับ เพื่อให้เร็ว)
+  void _sendGps() {
+    final c = _cmd;
+    final sp = gpsSpeed;
+    if (demo || link != LinkState.connected || c == null || _logoBusy || sp == null) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - _gpsSentMs < 120) return;
+    _gpsSentMs = now;
+    final v = (sp * 10).round().clamp(0, 65534).toInt();
+    try {
+      c.write([3, v & 255, (v >> 8) & 255], withoutResponse: c.properties.writeWithoutResponse).catchError((_) {});
     } catch (_) {}
   }
 
@@ -391,6 +425,7 @@ class GaugeController extends ChangeNotifier {
     if (ch == null || link != LinkState.connected || _dev == null) {
       return 'ยังไม่ได้เชื่อมต่อบอร์ด หรือเฟิร์มแวร์ยังไม่รองรับการส่งโลโก้';
     }
+    _logoBusy = true;
     try {
       final chunk = (_dev!.mtuNow - 4).clamp(16, 200).toInt();
       final n = data.length;
@@ -414,6 +449,8 @@ class GaugeController extends ChangeNotifier {
       return 'ไม่ได้รับการยืนยันจากบอร์ด';
     } catch (e) {
       return 'ส่งไม่สำเร็จ: $e';
+    } finally {
+      _logoBusy = false;
     }
   }
 
@@ -459,6 +496,7 @@ class GaugeController extends ChangeNotifier {
     _dataSub?.cancel();
     _connSub?.cancel();
     _gpsSub?.cancel();
+    _gpsWatch?.cancel();
     super.dispose();
   }
 }
@@ -521,7 +559,6 @@ class _SplashPageState extends State<SplashPage> with SingleTickerProviderStateM
 
   @override
   Widget build(BuildContext context) {
-    final th = Cfg.i.t;
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(fit: StackFit.expand, children: [
@@ -535,11 +572,11 @@ class _SplashPageState extends State<SplashPage> with SingleTickerProviderStateM
                 animation: ac,
                 builder: (_, __) => Column(mainAxisSize: MainAxisSize.min, children: [
                   Text('LOADING  ${(ac.value * 100).round()}%',
-                      style: TextStyle(fontFamily: kFont, fontSize: 9, color: th.c, letterSpacing: 1)),
+                      style: const TextStyle(fontFamily: kFont, fontSize: 9, color: Colors.white, letterSpacing: 1)),
                   const SizedBox(height: 6),
                   ClipRRect(
                     borderRadius: BorderRadius.circular(3),
-                    child: LinearProgressIndicator(value: ac.value, minHeight: 5, color: th.c, backgroundColor: Colors.white12),
+                    child: LinearProgressIndicator(value: ac.value, minHeight: 5, color: Colors.white, backgroundColor: Colors.white24),
                   ),
                 ]),
               ),
