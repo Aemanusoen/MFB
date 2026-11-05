@@ -83,6 +83,7 @@ class Cfg extends ChangeNotifier {
   int shift = 10000; // SHIFT LIGHT RPM
   int tempWarn = 105; // °C
   bool speedGps = true; // true = GPS, false = ECU
+  int graphOn = 15; // หน้า GRAPH: บิตเปิด-ปิดเส้นกราฟ RPM/TPS/GPS/AFR
   List<int> main = [kTps, kAfr, kIgn, kTemp, kEot, kBatt, kIat]; // ซ้าย 3 + ขวา 4
   List<int> grid = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
 
@@ -103,6 +104,7 @@ class Cfg extends ChangeNotifier {
       shift = (p.getInt('shift') ?? 10000).clamp(1000, 15000).toInt();
       tempWarn = (p.getInt('tempWarn') ?? 105).clamp(60, 150).toInt();
       speedGps = p.getBool('speedGps') ?? true;
+      graphOn = (p.getInt('gon') ?? 15) & 15;
       main = _parse(p.getString('main'), 7) ?? main;
       grid = _parse(p.getString('grid'), 12) ?? grid;
     } catch (_) {}
@@ -116,6 +118,7 @@ class Cfg extends ChangeNotifier {
       await p.setInt('shift', shift);
       await p.setInt('tempWarn', tempWarn);
       await p.setBool('speedGps', speedGps);
+      await p.setInt('gon', graphOn);
       await p.setString('main', main.join(','));
       await p.setString('grid', grid.join(','));
     } catch (_) {}
@@ -133,6 +136,11 @@ class Cfg extends ChangeNotifier {
 
   Future<void> addTemp(int d) {
     tempWarn = (tempWarn + d).clamp(60, 150).toInt();
+    return _save();
+  }
+
+  Future<void> toggleGraph(int i) {
+    graphOn ^= (1 << i);
     return _save();
   }
 
@@ -199,6 +207,38 @@ class GaugeController extends ChangeNotifier {
   int _gpsSentMs = 0, _gpsLastMs = 0;
   bool _logoBusy = false;
 
+  // ----- หน้า GRAPH: เก็บย้อนหลัง 60 วินาที (300 ตัวอย่าง ทุก 200 ms) + MIN/MAX ของ RPM / TPS / GPS / AFR -----
+  static const int gN = 300;
+  final List<List<double>> gHist = List.generate(4, (_) => <double>[]);
+  final List<double?> gMin = List<double?>.filled(4, null);
+  final List<double?> gMax = List<double?>.filled(4, null);
+  bool graphVisible = false;
+  Timer? _gTimer;
+
+  double? gVal(int i) {
+    final live = t.fresh || demo;
+    switch (i) {
+      case 0: return live ? t.rpm : null;
+      case 1: return live ? t.tps : null;
+      case 2: return demo ? t.speed : (gpsOk ? gpsSpeed : null);
+      default: return live ? t.afr : null;
+    }
+  }
+
+  void _gSample() {
+    for (int i = 0; i < 4; i++) {
+      final v = gVal(i);
+      final h = gHist[i];
+      h.add(v ?? double.nan);
+      if (h.length > gN) h.removeAt(0);
+      if (v != null) {
+        if (gMin[i] == null || v < gMin[i]!) gMin[i] = v;
+        if (gMax[i] == null || v > gMax[i]!) gMax[i] = v;
+      }
+    }
+    if (graphVisible) notifyListeners();
+  }
+
   bool get ecuLive => link == LinkState.connected && t.fresh;
 
   /// ความเร็วกลางเกจ: สลับโหมด GPS / ECU ได้ (แตะที่ตัวเลขความเร็ว)
@@ -228,6 +268,8 @@ class GaugeController extends ChangeNotifier {
 
   Future<void> init() async {
     await WakelockPlus.enable();
+    _gTimer?.cancel();
+    _gTimer = Timer.periodic(const Duration(milliseconds: 200), (_) => _gSample());
     await _startGps();
   }
 
@@ -307,6 +349,10 @@ class GaugeController extends ChangeNotifier {
   void resetMinMax() {
     topSpeed = 0;
     mm.clear();
+    for (int i = 0; i < 4; i++) {
+      gMin[i] = null;
+      gMax[i] = null;
+    }
     notifyListeners();
   }
 
@@ -497,6 +543,7 @@ class GaugeController extends ChangeNotifier {
     _connSub?.cancel();
     _gpsSub?.cancel();
     _gpsWatch?.cancel();
+    _gTimer?.cancel();
     super.dispose();
   }
 }
@@ -730,8 +777,11 @@ class _GaugePageState extends State<GaugePage> {
                   padding: const EdgeInsets.only(bottom: 14),
                   child: PageView(
                     controller: pc,
-                    onPageChanged: (i) => setState(() => page = i),
-                    children: [_mainPage(th, blinkOn), _gridPage(th, blinkOn)],
+                    onPageChanged: (i) {
+                      c.graphVisible = i == 2;
+                      setState(() => page = i);
+                    },
+                    children: [_mainPage(th, blinkOn), _gridPage(th, blinkOn), _graphPage(th)],
                   ),
                 ),
               ),
@@ -743,7 +793,7 @@ class _GaugePageState extends State<GaugePage> {
           left: 0, right: 0, bottom: 3,
           child: IgnorePointer(
             child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-              for (int i = 0; i < 2; i++)
+              for (int i = 0; i < 3; i++)
                 Container(
                   margin: const EdgeInsets.symmetric(horizontal: 3),
                   width: i == page ? 24 : 14, height: 5,
@@ -754,7 +804,7 @@ class _GaugePageState extends State<GaugePage> {
                   ),
                 ),
               const SizedBox(width: 8),
-              Text(page == 0 ? 'GAUGE' : 'GRID', style: const TextStyle(fontFamily: kFont, fontSize: 7, color: Colors.white54)),
+              Text(const ['GAUGE', 'GRID', 'GRAPH'][page], style: const TextStyle(fontFamily: kFont, fontSize: 7, color: Colors.white54)),
             ]),
           ),
         ),
@@ -811,6 +861,86 @@ class _GaugePageState extends State<GaugePage> {
           ]),
         ),
     ]);
+  }
+
+  // ----- หน้า 3: GRAPH (4 ช่อง แตะเพื่อเปิด/ปิดเส้นกราฟ ค่ายังแสดงในช่องเหมือนเดิม) -----
+  static const _gNames = ['RPM', 'TPS', 'GPS', 'AFR'];
+
+  Widget _graphPage(AppTheme th) {
+    final cfg = Cfg.i;
+    return Column(children: [
+      SizedBox(
+        height: 78,
+        child: Row(children: [
+          for (int i = 0; i < 4; i++)
+            Expanded(
+              child: Padding(
+                padding: EdgeInsets.only(right: i < 3 ? 6 : 0),
+                child: _graphBox(i, (cfg.graphOn & (1 << i)) != 0),
+              ),
+            ),
+        ]),
+      ),
+      const SizedBox(height: 6),
+      Expanded(
+        child: Container(
+          decoration: BoxDecoration(
+            color: const Color(0xCC060606),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: th.c.withOpacity(0.85), width: 1.1),
+            boxShadow: [BoxShadow(color: th.c.withOpacity(0.35), blurRadius: 10)],
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(11),
+            child: CustomPaint(painter: GraphPainter(hist: c.gHist, on: cfg.graphOn), size: Size.infinite),
+          ),
+        ),
+      ),
+    ]);
+  }
+
+  Widget _graphBox(int i, bool on) {
+    final col = GraphPainter.cols[i];
+    final v = c.gVal(i);
+    final dec = (i == 1 || i == 3) ? 1 : 0;
+    String f(double? x) => x == null ? '0' : x.toStringAsFixed(dec);
+    return GestureDetector(
+      onTap: () => Cfg.i.toggleGraph(i),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(8, 5, 8, 4),
+        decoration: BoxDecoration(
+          color: const Color(0xCC060606),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: on ? col : Colors.white24, width: on ? 1.6 : 1.0),
+          boxShadow: on ? [BoxShadow(color: col.withOpacity(0.4), blurRadius: 10)] : null,
+        ),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+            Text(_gNames[i], style: TextStyle(fontFamily: kFont, fontSize: 9, color: on ? col : Colors.white38)),
+            Icon(on ? Icons.show_chart : Icons.visibility_off, size: 13, color: on ? col : Colors.white30),
+          ]),
+          Expanded(
+            child: Center(
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Text(v == null ? '--' : v.toStringAsFixed(dec),
+                    style: TextStyle(fontFamily: kFont, fontSize: 22, color: Colors.white, shadows: [Shadow(color: col, blurRadius: 8)])),
+              ),
+            ),
+          ),
+          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+            Text.rich(TextSpan(children: [
+              const TextSpan(text: '▼ ', style: TextStyle(color: kGreen, fontSize: 8)),
+              TextSpan(text: f(c.gMin[i]), style: const TextStyle(color: kGreen, fontSize: 11)),
+            ])),
+            Text.rich(TextSpan(children: [
+              const TextSpan(text: '▲ ', style: TextStyle(color: kBad, fontSize: 8)),
+              TextSpan(text: f(c.gMax[i]), style: const TextStyle(color: kBad, fontSize: 11)),
+            ])),
+          ]),
+        ]),
+      ),
+    );
   }
 
   /// สร้างช่องค่าจากคีย์: สี/บาร์/กระพริบตามกฎ
@@ -947,6 +1077,78 @@ class _GaugePageState extends State<GaugePage> {
           child: Icon(ic, size: 20, color: th.c),
         ),
       );
+}
+
+// ---------- กราฟ 4 เส้น (RPM / TPS / GPS / AFR) ----------
+class GraphPainter extends CustomPainter {
+  final List<List<double>> hist;
+  final int on;
+  GraphPainter({required this.hist, required this.on});
+
+  static const cols = <Color>[Color(0xFFFF3B3B), kTpsBlue, Color(0xFF3CFF8A), Color(0xFFFFC233)];
+
+  static double norm(int i, double v) {
+    double lo = 0, hi = 1;
+    switch (i) {
+      case 0: hi = kMaxRpm; break;
+      case 1: hi = 100; break;
+      case 2: hi = 180; break;
+      default: lo = 10; hi = 18;
+    }
+    return ((v - lo) / (hi - lo)).clamp(0.0, 1.0).toDouble();
+  }
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    const pad = 10.0;
+    final grid = Paint()
+      ..color = Colors.white12
+      ..strokeWidth = 1;
+    for (int k = 0; k <= 4; k++) {
+      final y = pad + (size.height - 2 * pad) * k / 4;
+      canvas.drawLine(Offset(pad, y), Offset(size.width - pad, y), grid);
+    }
+    final step = (size.width - 2 * pad) / (GaugeController.gN - 1);
+    for (int i = 0; i < 4; i++) {
+      if ((on & (1 << i)) == 0) continue;
+      final h = hist[i];
+      final n = h.length;
+      final path = Path();
+      bool pen = false;
+      for (int j = 0; j < n; j++) {
+        final v = h[j];
+        if (v.isNaN) {
+          pen = false;
+          continue;
+        }
+        final x = size.width - pad - (n - 1 - j) * step;
+        final y = size.height - pad - norm(i, v) * (size.height - 2 * pad);
+        if (!pen) {
+          path.moveTo(x, y);
+          pen = true;
+        } else {
+          path.lineTo(x, y);
+        }
+      }
+      canvas.drawPath(
+          path,
+          Paint()
+            ..color = cols[i].withOpacity(0.55)
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 5
+            ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4));
+      canvas.drawPath(
+          path,
+          Paint()
+            ..color = cols[i]
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 2.2
+            ..strokeJoin = StrokeJoin.round);
+    }
+  }
+
+  @override
+  bool shouldRepaint(GraphPainter o) => true;
 }
 
 // ---------- แสงเตือนแดงจากขอบ 4 ด้าน ----------
