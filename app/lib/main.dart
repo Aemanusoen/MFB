@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
@@ -157,6 +158,36 @@ class Cfg extends ChangeNotifier {
   }
 }
 
+// ---------- DRAG LOG ----------
+enum DragSt { ready, run, done }
+
+class DragRun {
+  List<double?> t = List<double?>.filled(4, null); // เวลา (วินาที) ที่ 201 / 402 / 500 / 1000 m
+  List<double?> v = List<double?>.filled(4, null); // ความเร็ว (km/h) ที่ระยะนั้น
+  double maxKmh = 0;
+  bool get hasData => t[0] != null || maxKmh > 0;
+  void clear() {
+    t = List<double?>.filled(4, null);
+    v = List<double?>.filled(4, null);
+    maxKmh = 0;
+  }
+
+  Map<String, dynamic> toJson() => {'t': t, 'v': v, 'm': maxKmh};
+
+  static DragRun fromJson(dynamic j) {
+    final r = DragRun();
+    try {
+      final tt = (j['t'] as List), vv = (j['v'] as List);
+      for (int i = 0; i < 4; i++) {
+        r.t[i] = (tt[i] as num?)?.toDouble();
+        r.v[i] = (vv[i] as num?)?.toDouble();
+      }
+      r.maxKmh = (j['m'] as num?)?.toDouble() ?? 0;
+    } catch (_) {}
+    return r;
+  }
+}
+
 // ---------- ข้อมูลจาก ESP32 ----------
 class Telemetry {
   final bool fresh;
@@ -201,13 +232,156 @@ class GaugeController extends ChangeNotifier {
 
   BluetoothDevice? _dev;
   BluetoothCharacteristic? _cmd, _imgCh;
-  StreamSubscription? _scanSub, _dataSub, _connSub, _gpsSub;
+  StreamSubscription? _scanSub, _dataSub, _connSub, _gpsSub, _gnssSub;
+  static const EventChannel _gnss = EventChannel('mfb/gnss'); // จำนวนดาวเทียมจริงจาก Android (MainActivity.kt ที่ workflow เติมให้)
   Timer? _demoTimer, _retryTimer, _gpsWatch;
   bool _auto = false;
   int _gpsSentMs = 0, _gpsLastMs = 0;
   bool _logoBusy = false;
 
   // ----- หน้า GRAPH: เก็บย้อนหลัง 60 วินาที (300 ตัวอย่าง ทุก 200 ms) + MIN/MAX ของ RPM / TPS / GPS / AFR -----
+  // ----- สถานะ GPS / DRAG LOG -----
+  int? satUsed, satTotal; // จำนวนดาวเทียมที่ใช้คำนวณตำแหน่ง / จำนวนที่เห็นทั้งหมด (อ่านจริงจาก Android GNSS)
+  int satMax = 0; // จำนวนมากสุดที่เครื่องนี้เคยจับได้
+  double? gpsAccM, spdAccKmh; // ความแม่นยำตำแหน่ง (m) / ความเร็ว (km/h)
+  static const List<double> dragDist = [201, 402, 500, 1000];
+  final List<DragRun> runs = List.generate(3, (_) => DragRun());
+  int dragSel = 0;
+  DragSt dragSt = DragSt.ready;
+  double dragMeters = 0, dragSecs = 0;
+  DateTime? _dTs;
+  double _dPrev = 0, _dDist = 0, _dT = 0;
+  int _dStill = 0;
+
+  bool get dragFull => runs[dragSel].hasData && dragSt != DragSt.run;
+
+  Future<void> _dragLoad() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      satMax = p.getInt('satMax') ?? 0;
+      final sv = p.getString('drag');
+      if (sv != null) {
+        final l = jsonDecode(sv) as List;
+        for (int i = 0; i < 3 && i < l.length; i++) {
+          runs[i] = DragRun.fromJson(l[i]);
+        }
+      }
+      dragSel = runs.indexWhere((r) => !r.hasData);
+      if (dragSel < 0) dragSel = 0;
+      notifyListeners();
+    } catch (_) {}
+  }
+
+  Future<void> _saveSatMax() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setInt('satMax', satMax);
+    } catch (_) {}
+  }
+
+  void _startGnss() {
+    if (defaultTargetPlatform != TargetPlatform.android) return;
+    _gnssSub?.cancel();
+    _gnssSub = _gnss.receiveBroadcastStream().listen((e) {
+      if (e is Map) {
+        satUsed = (e['used'] as num?)?.toInt();
+        satTotal = (e['visible'] as num?)?.toInt();
+        if (satTotal != null && satTotal! > satMax) {
+          satMax = satTotal!;
+          _saveSatMax();
+        }
+        notifyListeners();
+      }
+    }, onError: (_) {});
+  }
+
+  Future<void> _dragSave() async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setString('drag', jsonEncode(runs.map((r) => r.toJson()).toList()));
+    } catch (_) {}
+  }
+
+  void selectRun(int i) {
+    if (dragSt == DragSt.run) return;
+    dragSel = i;
+    notifyListeners();
+  }
+
+  /// ล้าง LOG ทั้ง 3 RUN (ค่าจะไม่ถูกลบจนกว่าจะกดปุ่มนี้)
+  void resetDragLog() {
+    for (final r in runs) {
+      r.clear();
+    }
+    dragSel = 0;
+    dragSt = DragSt.ready;
+    dragMeters = 0;
+    dragSecs = 0;
+    _dragSave();
+    notifyListeners();
+  }
+
+  void _dragFinish() {
+    final run = runs[dragSel];
+    if (run.t[0] == null) {
+      run.clear(); // ยังไม่ถึงระยะแรก = ยกเลิก ไม่บันทึก
+    } else {
+      _dragSave();
+      final nxt = runs.indexWhere((r) => !r.hasData);
+      if (nxt >= 0) dragSel = nxt; // ขยับไป RUN ว่างถัดไป
+    }
+    dragSt = DragSt.done;
+  }
+
+  /// เรียกทุกครั้งที่ได้ค่า GPS ใหม่ : จับเวลา/ระยะจากความเร็ว GPS (ประมาณค่า เพื่อจัดหน้าตาก่อน)
+  void _dragUpdate(double kmh, DateTime ts) {
+    final run = runs[dragSel];
+    switch (dragSt) {
+      case DragSt.ready:
+        if (kmh >= 3 && !run.hasData) {
+          dragSt = DragSt.run;
+          _dDist = 0;
+          _dT = 0;
+          _dTs = ts;
+          _dPrev = kmh;
+          _dStill = 0;
+          run.clear();
+          run.maxKmh = kmh;
+        }
+        break;
+      case DragSt.run:
+        final dt = ts.difference(_dTs ?? ts).inMilliseconds / 1000.0;
+        if (dt <= 0) break;
+        final d = (_dPrev / 3.6 + kmh / 3.6) / 2 * dt;
+        final d0 = _dDist, t0 = _dT;
+        _dDist += d;
+        _dT += dt;
+        for (int k = 0; k < 4; k++) {
+          if (run.t[k] == null && _dDist >= dragDist[k]) {
+            final f = d <= 0 ? 1.0 : ((dragDist[k] - d0) / d).clamp(0.0, 1.0).toDouble();
+            run.t[k] = t0 + f * dt;
+            run.v[k] = _dPrev + f * (kmh - _dPrev);
+          }
+        }
+        if (kmh > run.maxKmh) run.maxKmh = kmh;
+        _dTs = ts;
+        _dPrev = kmh;
+        dragMeters = _dDist;
+        dragSecs = _dT;
+        if (run.t[3] != null) {
+          _dragFinish();
+        } else if (kmh < 2) {
+          if (++_dStill >= 3) _dragFinish();
+        } else {
+          _dStill = 0;
+        }
+        break;
+      case DragSt.done:
+        if (kmh < 2) dragSt = DragSt.ready; // หยุดนิ่งแล้ว พร้อมรอบถัดไป
+        break;
+    }
+  }
+
   static const int gN = 300;
   final List<List<double>> gHist = List.generate(4, (_) => <double>[]);
   final List<double?> gMin = List<double?>.filled(4, null);
@@ -270,6 +444,7 @@ class GaugeController extends ChangeNotifier {
     await WakelockPlus.enable();
     _gTimer?.cancel();
     _gTimer = Timer.periodic(const Duration(milliseconds: 200), (_) => _gSample());
+    _dragLoad();
     await _startGps();
   }
 
@@ -277,6 +452,7 @@ class GaugeController extends ChangeNotifier {
     try {
       final perm = await Geolocator.requestPermission();
       if (perm == LocationPermission.denied || perm == LocationPermission.deniedForever) return;
+      _startGnss();
       // Android: ใช้ GPS ตรง (LocationManager) และขอทุก 200 ms -> ได้ความเร็วเร็วที่สุดเท่าที่ชิป GPS ให้ (ปกติ ~1 Hz ขึ้นไป)
       final LocationSettings ls = defaultTargetPlatform == TargetPlatform.android
           ? AndroidSettings(
@@ -290,6 +466,9 @@ class GaugeController extends ChangeNotifier {
         gpsOk = true;
         _gpsLastMs = DateTime.now().millisecondsSinceEpoch;
         gpsSpeed = math.max(0.0, p.speed * 3.6);
+        gpsAccM = p.accuracy;
+        spdAccKmh = p.speedAccuracy > 0 ? p.speedAccuracy * 3.6 : null;
+        _dragUpdate(gpsSpeed!, p.timestamp);
         _track();
         _sendGps();
         notifyListeners();
@@ -543,6 +722,7 @@ class GaugeController extends ChangeNotifier {
     _connSub?.cancel();
     _gpsSub?.cancel();
     _gpsWatch?.cancel();
+    _gnssSub?.cancel();
     _gTimer?.cancel();
     super.dispose();
   }
@@ -781,7 +961,7 @@ class _GaugePageState extends State<GaugePage> {
                       c.graphVisible = i == 2;
                       setState(() => page = i);
                     },
-                    children: [_mainPage(th, blinkOn), _gridPage(th, blinkOn), _graphPage(th)],
+                    children: [_mainPage(th, blinkOn), _gridPage(th, blinkOn), _graphPage(th), _dragPage(th)],
                   ),
                 ),
               ),
@@ -793,7 +973,7 @@ class _GaugePageState extends State<GaugePage> {
           left: 0, right: 0, bottom: 3,
           child: IgnorePointer(
             child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-              for (int i = 0; i < 3; i++)
+              for (int i = 0; i < 4; i++)
                 Container(
                   margin: const EdgeInsets.symmetric(horizontal: 3),
                   width: i == page ? 24 : 14, height: 5,
@@ -804,7 +984,7 @@ class _GaugePageState extends State<GaugePage> {
                   ),
                 ),
               const SizedBox(width: 8),
-              Text(const ['GAUGE', 'GRID', 'GRAPH'][page], style: const TextStyle(fontFamily: kFont, fontSize: 7, color: Colors.white54)),
+              Text(const ['GAUGE', 'GRID', 'GRAPH', 'DRAG LOG'][page], style: const TextStyle(fontFamily: kFont, fontSize: 7, color: Colors.white54)),
             ]),
           ),
         ),
@@ -861,6 +1041,226 @@ class _GaugePageState extends State<GaugePage> {
           ]),
         ),
     ]);
+  }
+
+  // ----- หน้า 4: DRAG LOG (จัดหน้าตาก่อน) -----
+  Widget _frame(AppTheme th, Widget child, {EdgeInsets pad = const EdgeInsets.all(8)}) => Container(
+        padding: pad,
+        decoration: BoxDecoration(
+          color: const Color(0xCC060606),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: th.c.withOpacity(0.85), width: 1.1),
+          boxShadow: [BoxShadow(color: th.c.withOpacity(0.3), blurRadius: 10)],
+        ),
+        child: child,
+      );
+
+  Widget _dragPage(AppTheme th) {
+    final run = c.runs[c.dragSel];
+    final sp = c.demo ? c.t.speed : (c.gpsOk ? c.gpsSpeed : null);
+    // สีสัญญาณ GPS: ดาวเทียม >= 15 ดวง = เขียว (ถ้ายังไม่มีจำนวนดาวเทียมจริง ใช้ความแม่นยำตำแหน่งแทนไปก่อน)
+    Color gpsCol;
+    if (c.satUsed != null) {
+      gpsCol = c.satUsed! >= 15 ? kGreen : (c.satUsed! >= 8 ? kAmber : kBad);
+    } else if (!c.gpsOk) {
+      gpsCol = kBad;
+    } else {
+      final a = c.gpsAccM ?? 99;
+      gpsCol = a <= 10 ? kGreen : (a <= 25 ? kAmber : kBad);
+    }
+    final acc = c.spdAccKmh == null ? '--' : c.spdAccKmh!.round().toString();
+    final stTxt = c.dragSt == DragSt.run ? 'RUNNING' : (c.dragFull ? 'RUN ${c.dragSel + 1} FULL' : (c.dragSt == DragSt.done ? 'DONE' : 'READY'));
+    final stCol = c.dragSt == DragSt.run ? kAmber : (c.dragFull ? kBad : (c.dragSt == DragSt.done ? th.c : kGreen));
+    const lab = TextStyle(fontSize: 13, color: Colors.white70);
+
+    return Column(children: [
+      _frame(
+        th,
+        Row(children: [
+          Icon(Icons.signal_cellular_alt, color: gpsCol, size: 22),
+          const SizedBox(width: 4),
+          Text('GPS', style: TextStyle(fontFamily: kFont, fontSize: 12, color: gpsCol, shadows: [Shadow(color: gpsCol, blurRadius: 8)])),
+          const SizedBox(width: 16),
+          Text('Satellites in use: ${c.satUsed ?? '--'} of ${c.satTotal ?? '--'}', style: lab),
+          if (c.satMax > 0) Text('  (max ${c.satMax})', style: const TextStyle(fontSize: 11, color: Colors.white38)),
+          const SizedBox(width: 16),
+          Text('Speed ${sp == null ? '--' : sp.round()} ± $acc km/h', style: lab),
+          const Spacer(),
+          Text(stTxt, style: TextStyle(fontFamily: kFont, fontSize: 11, color: stCol, shadows: [Shadow(color: stCol, blurRadius: 8)])),
+        ]),
+        pad: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+      ),
+      const SizedBox(height: 6),
+      Expanded(
+        child: Row(children: [
+          Expanded(flex: 3, child: _frame(th, _splitTable(th, run))),
+          const SizedBox(width: 6),
+          Expanded(flex: 2, child: _frame(th, _dragControls(th, run))),
+        ]),
+      ),
+      const SizedBox(height: 6),
+      _speedTacho(th, sp),
+    ]);
+  }
+
+  Widget _splitTable(AppTheme th, DragRun run) {
+    Widget cell(String s, {bool head = false, bool right = true, Color? col, double size = 15}) => Align(
+          alignment: right ? Alignment.centerRight : Alignment.centerLeft,
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            child: Text(s,
+                style: TextStyle(
+                    fontFamily: kFont,
+                    fontSize: head ? 9 : size,
+                    color: head ? Colors.white54 : (col ?? Colors.white),
+                    shadows: head || col == null ? null : [Shadow(color: col, blurRadius: 8)])),
+          ),
+        );
+    Widget row(Widget a, Widget b, Widget d, {bool last = false}) => Expanded(
+          child: Container(
+            decoration: BoxDecoration(border: last ? null : const Border(bottom: BorderSide(color: Colors.white12))),
+            child: Row(children: [
+              Expanded(flex: 4, child: a),
+              Expanded(flex: 4, child: b),
+              Expanded(flex: 4, child: d),
+            ]),
+          ),
+        );
+    String tm(double? v) => v == null ? '--' : '${v.toStringAsFixed(2)} s';
+    String kh(double? v) => v == null ? '--' : '${v.round()} km/h';
+    return Column(children: [
+      row(cell('DIST', head: true, right: false), cell('TIME', head: true), cell('SPEED', head: true)),
+      for (int i = 0; i < 4; i++)
+        row(cell('${GaugeController.dragDist[i].round()}m', right: false, col: th.c), cell(tm(run.t[i])), cell(kh(run.v[i]))),
+      row(cell('MAX SPEED', right: false, size: 13, col: th.c), cell(''), cell(run.maxKmh > 0 ? '${run.maxKmh.round()} KM/H' : '-- KM/H'), last: true),
+    ]);
+  }
+
+  Widget _dragControls(AppTheme th, DragRun run) {
+    final running = c.dragSt == DragSt.run;
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      const Text('LOG RUN', style: TextStyle(fontFamily: kFont, fontSize: 9, color: Colors.white54)),
+      const SizedBox(height: 6),
+      Row(children: [
+        for (int i = 0; i < 3; i++)
+          Expanded(
+            child: Padding(
+              padding: EdgeInsets.only(right: i < 2 ? 6 : 0),
+              child: InkWell(
+                onTap: () => c.selectRun(i),
+                borderRadius: BorderRadius.circular(6),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(vertical: 9),
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: c.dragSel == i ? th.c.withOpacity(0.3) : Colors.black45,
+                    border: Border.all(color: c.dragSel == i ? th.c : Colors.white24, width: c.dragSel == i ? 1.6 : 1),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text('RUN ${i + 1}${c.runs[i].hasData ? ' ●' : ''}', style: const TextStyle(fontFamily: kFont, fontSize: 9)),
+                ),
+              ),
+            ),
+          ),
+      ]),
+      Expanded(
+        child: Center(
+          child: running
+              ? Column(mainAxisSize: MainAxisSize.min, children: [
+                  Text('${c.dragSecs.toStringAsFixed(2)} s',
+                      style: TextStyle(fontFamily: kFont, fontSize: 26, color: Colors.white, shadows: [Shadow(color: th.c, blurRadius: 10)])),
+                  const SizedBox(height: 4),
+                  Text('${c.dragMeters.round()} m', style: const TextStyle(fontSize: 14, color: Colors.white70)),
+                ])
+              : Text(
+                  c.dragFull ? 'RUN ${c.dragSel + 1} มีข้อมูลแล้ว\nเลือก RUN อื่น หรือกด RESET LOG' : 'รอออกตัว… (ความเร็ว > 3 km/h)',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontSize: 12, color: Colors.white54)),
+        ),
+      ),
+      InkWell(
+        onTap: running ? null : _confirmReset,
+        borderRadius: BorderRadius.circular(6),
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 9),
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: Colors.black45,
+            border: Border.all(color: kBad, width: 1.4),
+            borderRadius: BorderRadius.circular(6),
+            boxShadow: [BoxShadow(color: kBad.withOpacity(0.3), blurRadius: 8)],
+          ),
+          child: const Text('RESET LOG', style: TextStyle(fontFamily: kFont, fontSize: 10, color: kBad)),
+        ),
+      ),
+    ]);
+  }
+
+  Future<void> _confirmReset() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dctx) => AlertDialog(
+        backgroundColor: const Color(0xFF14141A),
+        title: const Text('RESET LOG', style: TextStyle(fontFamily: kFont, fontSize: 14)),
+        content: const Text('ลบ LOG ทั้ง 3 RUN ใช่หรือไม่?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(dctx).pop(false), child: const Text('ยกเลิก')),
+          TextButton(onPressed: () => Navigator.of(dctx).pop(true), child: const Text('ลบทั้งหมด', style: TextStyle(color: kBad))),
+        ],
+      ),
+    );
+    if (ok == true) c.resetDragLog();
+  }
+
+  /// TACHO SPEED 0-240 ไล่สีเขียว -> เหลือง -> แดง
+  Widget _speedTacho(AppTheme th, double? sp) {
+    final frac = ((sp ?? 0) / 240).clamp(0.0, 1.0).toDouble();
+    const n = 48;
+    return _frame(
+      th,
+      Row(children: [
+        Expanded(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            SizedBox(
+              height: 14,
+              child: Row(children: [
+                for (int i = 0; i < n; i++)
+                  Expanded(
+                    child: Builder(builder: (_) {
+                      final pos = (i + 0.5) / n;
+                      final lit = pos <= frac;
+                      final col = rpmColor(pos * 240, 240);
+                      return Container(
+                        margin: const EdgeInsets.symmetric(horizontal: 1),
+                        decoration: BoxDecoration(
+                          color: lit ? col : Colors.white.withOpacity(0.12),
+                          borderRadius: BorderRadius.circular(2),
+                          boxShadow: lit ? [BoxShadow(color: col.withOpacity(0.6), blurRadius: 5)] : null,
+                        ),
+                      );
+                    }),
+                  ),
+              ]),
+            ),
+            const SizedBox(height: 3),
+            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+              for (int k = 0; k <= 240; k += 40) Text('$k', style: const TextStyle(fontFamily: kFont, fontSize: 8, color: Colors.white54)),
+            ]),
+          ]),
+        ),
+        const SizedBox(width: 10),
+        SizedBox(
+          width: 96,
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerRight,
+            child: Text('${sp == null ? '--' : sp.round()} km/h',
+                style: TextStyle(fontFamily: kFont, fontSize: 18, color: Colors.white, shadows: [Shadow(color: th.c, blurRadius: 9)])),
+          ),
+        ),
+      ]),
+      pad: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+    );
   }
 
   // ----- หน้า 3: GRAPH (4 ช่อง แตะเพื่อเปิด/ปิดเส้นกราฟ ค่ายังแสดงในช่องเหมือนเดิม) -----
