@@ -68,6 +68,69 @@ jobs:
           }
           EOG
 
+      # อ่านจำนวนดาวเทียมจริงจาก Android (GnssStatus) ส่งให้หน้า DRAG LOG ผ่าน EventChannel "mfb/gnss"
+      - name: Add GNSS satellite channel (MainActivity.kt)
+        run: |
+          F=$(find android/app/src/main -name MainActivity.kt | head -1)
+          PKG=$(grep -m1 '^package ' "$F")
+          cat > /tmp/ma_body.kt <<'EOK'
+
+          import android.annotation.SuppressLint
+          import android.content.Context
+          import android.location.GnssStatus
+          import android.location.LocationManager
+          import android.os.Build
+          import android.os.Handler
+          import android.os.Looper
+          import androidx.annotation.RequiresApi
+          import io.flutter.embedding.android.FlutterActivity
+          import io.flutter.embedding.engine.FlutterEngine
+          import io.flutter.plugin.common.EventChannel
+
+          class MainActivity : FlutterActivity() {
+              private var cb: Any? = null
+
+              override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+                  super.configureFlutterEngine(flutterEngine)
+                  EventChannel(flutterEngine.dartExecutor.binaryMessenger, "mfb/gnss").setStreamHandler(object : EventChannel.StreamHandler {
+                      override fun onListen(args: Any?, sink: EventChannel.EventSink?) {
+                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && sink != null) startGnss(sink)
+                      }
+                      override fun onCancel(args: Any?) {
+                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) stopGnss()
+                      }
+                  })
+              }
+
+              @RequiresApi(Build.VERSION_CODES.N)
+              @SuppressLint("MissingPermission")
+              private fun startGnss(sink: EventChannel.EventSink) {
+                  val lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+                  val c = object : GnssStatus.Callback() {
+                      override fun onSatelliteStatusChanged(status: GnssStatus) {
+                          var used = 0
+                          for (i in 0 until status.satelliteCount) if (status.usedInFix(i)) used++
+                          sink.success(mapOf("used" to used, "visible" to status.satelliteCount))
+                      }
+                  }
+                  cb = c
+                  try {
+                      lm.registerGnssStatusCallback(c, Handler(Looper.getMainLooper()))
+                  } catch (e: Exception) {
+                      sink.error("gnss", e.message, null)
+                  }
+              }
+
+              @RequiresApi(Build.VERSION_CODES.N)
+              private fun stopGnss() {
+                  val lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+                  (cb as? GnssStatus.Callback)?.let { lm.unregisterGnssStatusCallback(it) }
+                  cb = null
+              }
+          }
+          EOK
+          { echo "$PKG"; cat /tmp/ma_body.kt; } > "$F"
+
       - run: flutter pub get
 
       - name: Generate launcher icon (ถ้ามี app/assets/icon.png)
