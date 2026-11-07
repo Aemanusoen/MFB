@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' as io;
 import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
@@ -10,6 +11,7 @@ import 'package:file_picker/file_picker.dart' show FilePicker, FileType;
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:path_provider/path_provider.dart' show getApplicationDocumentsDirectory;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
@@ -190,15 +192,43 @@ class DragRun {
   }
 }
 
+// ---------- สถานะแฟลช ECU จากเกจ (FW 1.0.9: แพ็กเก็ต DATA ไบต์ 34..69) ----------
+class FlashStat {
+  final bool prep; // เกจเปิดหน้าเตรียมแฟลชอยู่
+  final int phase, ecu, err, pct, fileSize, fileSum, fileCk8, done, total, elapsed, eta, recv;
+  final double? batt;
+  final List<int>? ecm;
+  const FlashStat({
+    required this.prep, required this.phase, required this.ecu, required this.err, required this.pct,
+    required this.fileSize, required this.fileSum, required this.fileCk8, required this.done, required this.total,
+    required this.elapsed, required this.eta, required this.recv, this.batt, this.ecm,
+  });
+  bool get busy => phase >= 4 && phase <= 8;
+
+  static FlashStat? parse(List<int> b) {
+    if (b.length < 70 || b[34] < 1) return null;
+    final d = ByteData.sublistView(Uint8List.fromList(b));
+    return FlashStat(
+      prep: b[35] != 0, phase: b[36], ecu: b[37], err: b[38], pct: b[39],
+      fileSize: d.getUint32(40, Endian.little), fileSum: d.getUint16(44, Endian.little), fileCk8: b[46],
+      batt: b[47] == 0 ? null : b[47] / 10,
+      done: d.getUint32(48, Endian.little), total: d.getUint32(52, Endian.little),
+      elapsed: d.getUint16(56, Endian.little), eta: d.getUint16(58, Endian.little),
+      ecm: b[65] != 0 ? b.sublist(60, 65) : null, recv: d.getUint32(66, Endian.little),
+    );
+  }
+}
+
 // ---------- ข้อมูลจาก ESP32 ----------
 class Telemetry {
   final bool fresh;
   final int state, proto, bike, img;
   final double? rpm, speed, ect, iat, eot, tps, map, batt, afr, ign, inj, o2v, stft, ltft;
+  final FlashStat? fl; // null = เฟิร์มแวร์เกจไม่รองรับการแฟลช (ต่ำกว่า 1.0.9)
   Telemetry({
     this.fresh = false, this.state = 0, this.proto = 0, this.bike = 0, this.img = 0,
     this.rpm, this.speed, this.ect, this.iat, this.eot, this.tps, this.map,
-    this.batt, this.afr, this.ign, this.inj, this.o2v, this.stft, this.ltft,
+    this.batt, this.afr, this.ign, this.inj, this.o2v, this.stft, this.ltft, this.fl,
   });
 
   static Telemetry? parse(List<int> b) {
@@ -215,6 +245,7 @@ class Telemetry {
       eot: f(14, 10), tps: f(16, 10), map: f(18, 10), batt: f(20, 100),
       afr: f(22, 100), ign: f(24, 10), inj: f(26, 100), o2v: f(28, 1000),
       stft: f(30, 1000), ltft: f(32, 1000),
+      fl: FlashStat.parse(b),
     );
   }
 }
@@ -742,6 +773,68 @@ class GaugeController extends ChangeNotifier {
     }
   }
 
+  /// ส่งไฟล์ BIN ไปเก็บในเกจ (เกจต้องอยู่หน้าเตรียมแฟลช) คืนค่า null = สำเร็จ, ข้อความ = error
+  Future<String?> sendBin(Uint8List data, void Function(double) onProgress) async {
+    final ch = _imgCh;
+    if (ch == null || link != LinkState.connected || _dev == null) return 'ยังไม่ได้เชื่อมต่อเกจ';
+    final f0 = t.fl;
+    if (f0 == null) return 'เฟิร์มแวร์เกจยังไม่รองรับการแฟลช (ต้อง FW 1.0.9 ขึ้นไป)';
+    if (!f0.prep) return 'เกจยังไม่อยู่หน้าเตรียมแฟลช';
+    _logoBusy = true;
+    try {
+      final chunk = (_dev!.mtuNow - 4).clamp(16, 200).toInt();
+      final n = data.length;
+      await ch.write([0x21, n & 255, (n >> 8) & 255, (n >> 16) & 255, (n >> 24) & 255]);
+      int sum = 0;
+      bool sawRecv = false;
+      for (int off = 0; off < n; off += chunk) {
+        final end = math.min(n, off + chunk);
+        final part = data.sublist(off, end);
+        for (final b in part) {
+          sum = (sum + b) & 0xFFFF;
+        }
+        await ch.write([0x22, ...part]);
+        onProgress(end / n);
+        final f = t.fl;
+        if (f != null && f.phase == 2) sawRecv = true;
+        if (sawRecv && f != null && f.phase != 2 && f.err != 0) return 'เกจรับไฟล์ไม่สำเร็จ: ${flashErrText(f.err)}';
+        if (link != LinkState.connected) return 'การเชื่อมต่อหลุดระหว่างส่งไฟล์';
+      }
+      await ch.write([0x23, sum & 255, (sum >> 8) & 255]);
+      for (int i = 0; i < 60; i++) {
+        await Future.delayed(const Duration(milliseconds: 100));
+        final f = t.fl;
+        if (f != null && f.phase != 2 && f.fileSize == n && f.fileSum == sum && f.fileCk8 == 0) return null;
+        if (f != null && f.phase != 2 && f.err != 0) return 'เกจรับไฟล์ไม่สำเร็จ: ${flashErrText(f.err)}';
+      }
+      return 'ไม่ได้รับการยืนยันจากเกจ';
+    } catch (e) {
+      return 'ส่งไม่สำเร็จ: $e';
+    } finally {
+      _logoBusy = false;
+    }
+  }
+
+  /// สั่งเกจเริ่มแฟลช [0x10][u32 offset][u32 size][u16 sum16]
+  Future<String?> startFlash(int offset, int size, int sum16) async {
+    final c = _cmd;
+    if (c == null || link != LinkState.connected) return 'ยังไม่ได้เชื่อมต่อเกจ';
+    final b = ByteData(11)
+      ..setUint8(0, 0x10)
+      ..setUint32(1, offset, Endian.little)
+      ..setUint32(5, size, Endian.little)
+      ..setUint16(9, sum16 & 0xFFFF, Endian.little);
+    try {
+      await c.write(b.buffer.asUint8List(), withoutResponse: false);
+      return null;
+    } catch (e) {
+      return 'ส่งคำสั่งไม่สำเร็จ: $e';
+    }
+  }
+
+  /// ล้างผลแฟลชครั้งก่อนในเกจ (DONE/FAIL -> READY)
+  Future<void> clearFlash() => sendCmd([0x12]);
+
   Future<String?> resetLogo() async {
     final ch = _imgCh;
     if (ch == null || link != LinkState.connected) return 'ยังไม่ได้เชื่อมต่อบอร์ด';
@@ -1111,6 +1204,10 @@ class _GaugePageState extends State<GaugePage> {
                     () => c.link == LinkState.connected ? c.disconnect() : c.connect(), th),
                 const SizedBox(width: 6),
                 _btn('DEMO', c.toggleDemo, th, active: c.demo),
+                const SizedBox(width: 6),
+                _iconBtn(Icons.bolt, th, () {
+                  Navigator.of(context).push(MaterialPageRoute(builder: (_) => FlashPage(c: c)));
+                }),
                 const SizedBox(width: 6),
                 _iconBtn(Icons.tune, th, () {
                   Navigator.of(context).push(MaterialPageRoute(builder: (_) => TunePage(c: c)));
@@ -3550,7 +3647,7 @@ class _TunePageState extends State<TunePage> {
     }
   }
 
-  // ----- SAVE เป็นไฟล์ BIN ใหม่ -----
+  // ----- SAVE: บันทึกเข้าคลังไฟล์ (ตั้งชื่อเอง) หรือส่งออกเป็นไฟล์ — ไม่แก้ checksum อัตโนมัติ -----
   Future<void> _save() async {
     if (!s.ready) {
       _snack('ยังไม่ได้เปิดไฟล์ BIN + XDF');
@@ -3559,8 +3656,9 @@ class _TunePageState extends State<TunePage> {
     final th = Cfg.i.t;
     final names = s.changedNames();
     final locks = s.lockChanges();
-    final name = s.newFileName();
-    bool ack = false;
+    final fname = s.newFileName();
+    final stem = fname.toLowerCase().endsWith('.bin') ? fname.substring(0, fname.length - 4) : fname;
+    final tc = TextEditingController(text: stem);
     Widget box(Color col, String head, String body) => Container(
           width: double.infinity,
           margin: const EdgeInsets.only(top: 10),
@@ -3576,70 +3674,92 @@ class _TunePageState extends State<TunePage> {
             Text(body, style: const TextStyle(fontSize: 12.5, height: 1.35)),
           ]),
         );
-    final ok = await showDialog<bool>(
+    int sum8 = 0;
+    for (final x in s.bin!) {
+      sum8 = (sum8 + x) & 0xFF;
+    }
+    final act = await showDialog<int>(
       context: context,
-      builder: (dctx) => StatefulBuilder(
-        builder: (dctx, setD) => AlertDialog(
-          backgroundColor: const Color(0xFF14141A),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: th.c, width: 1.2)),
-          title: Text('SAVE เป็น BIN ใหม่', style: TextStyle(fontFamily: kFont, fontSize: 13, color: th.c)),
-          content: SizedBox(
-            width: 560,
-            child: SingleChildScrollView(
-              child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text('ต้นฉบับ: ${s.binName} (ไม่ถูกเขียนทับ)', style: const TextStyle(fontSize: 12.5, color: Colors.white70)),
-                Text('ไฟล์ใหม่: $name', style: const TextStyle(fontSize: 12.5)),
-                const SizedBox(height: 6),
-                Text(
-                    names.isEmpty
-                        ? 'ยังไม่มีการแก้ไข (ไฟล์ใหม่จะเหมือนต้นฉบับ)'
-                        : 'แก้ไข ${s.changedBytes} ไบต์ ใน ${names.length} รายการ: ${names.take(8).join(', ')}${names.length > 8 ? ' …' : ''}',
-                    style: const TextStyle(fontSize: 12.5)),
-                box(kAmber, '⚠ CHECKSUM',
-                    'แอพยังไม่รู้วิธีคำนวณ checksum ของกล่องรุ่นนี้ ไฟล์ที่บันทึกจะไม่ได้แก้ checksum ให้\n'
-                        'แฟลชด้วยโปรแกรมเดิมที่คำนวณ checksum ให้อัตโนมัติ หรือเปิดไฟล์ตรวจในโปรแกรมนั้นก่อนแฟลช — '
-                        'ถ้า checksum ผิด กล่องอาจไม่รับไฟล์หรือรถสตาร์ทไม่ติด'),
-                if (locks.isEmpty)
-                  box(Colors.white38, 'รหัสล็อคกล่อง', 'ไม่ได้เปลี่ยน')
-                else
-                  box(kBad, '⚠ รหัสล็อคกล่องถูกเปลี่ยน',
-                      '${locks.map((l) => '${l.$1.title}: ${l.$2} → ${l.$3}').join('\n')}\nจดรหัสใหม่ไว้ ถ้าจำไม่ได้อาจอ่าน/แฟลชกล่องไม่ได้อีก'),
-                const SizedBox(height: 8),
-                InkWell(
-                  onTap: () => setD(() => ack = !ack),
-                  child: Row(children: [
-                    Checkbox(value: ack, activeColor: th.c, onChanged: (v) => setD(() => ack = v ?? false)),
-                    const Expanded(child: Text('เข้าใจแล้ว จะตรวจ checksum ก่อนแฟลช', style: TextStyle(fontSize: 13))),
-                  ]),
-                ),
-              ]),
-            ),
+      builder: (dctx) => AlertDialog(
+        backgroundColor: const Color(0xFF14141A),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: th.c, width: 1.2)),
+        title: Text('SAVE', style: TextStyle(fontFamily: kFont, fontSize: 13, color: th.c)),
+        content: SizedBox(
+          width: 560,
+          child: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              TextField(
+                controller: tc,
+                decoration: const InputDecoration(labelText: 'ชื่อไฟล์ (ตั้งเองได้)', isDense: true),
+              ),
+              const SizedBox(height: 8),
+              Text('ต้นฉบับ: ${s.binName} (ไม่ถูกเขียนทับ)', style: const TextStyle(fontSize: 12.5, color: Colors.white70)),
+              Text(
+                  names.isEmpty
+                      ? 'ยังไม่มีการแก้ไข (ไฟล์จะเหมือนต้นฉบับ)'
+                      : 'แก้ไข ${s.changedBytes} ไบต์ ใน ${names.length} รายการ: ${names.take(8).join(', ')}${names.length > 8 ? ' …' : ''}',
+                  style: const TextStyle(fontSize: 12.5)),
+              box(kAmber, 'CHECKSUM (ไม่แก้อัตโนมัติ)',
+                  'ผลรวมไบต์ของไฟล์ตอนนี้ = 0x${sum8.toRadixString(16).toUpperCase().padLeft(2, '0')}${sum8 == 0 ? ' (ผ่าน)' : ' (ยังไม่ผ่าน)'}\n'
+                      'บันทึกตามที่แก้ไว้ — ใส่ Start Offset และตำแหน่ง checksum (Fix) ตอนกดแฟลชในหน้า FLASH ECU '
+                      'หรือในโปรแกรมแฟลชที่ใช้'),
+              if (locks.isEmpty)
+                box(Colors.white38, 'รหัสล็อคกล่อง', 'ไม่ได้เปลี่ยน')
+              else
+                box(kBad, '⚠ รหัสล็อคกล่องถูกเปลี่ยน',
+                    '${locks.map((l) => '${l.$1.title}: ${l.$2} → ${l.$3}').join('\n')}\nจดรหัสใหม่ไว้ ถ้าจำไม่ได้อาจอ่าน/แฟลชกล่องไม่ได้อีก'),
+            ]),
           ),
-          actions: [
-            TextButton(onPressed: () => Navigator.of(dctx).pop(false), child: const Text('ยกเลิก')),
-            TextButton(
-              onPressed: ack ? () => Navigator.of(dctx).pop(true) : null,
-              child: Text('บันทึก', style: TextStyle(color: ack ? th.c : Colors.white30, fontWeight: FontWeight.bold)),
-            ),
-          ],
         ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(dctx).pop(0), child: const Text('ยกเลิก')),
+          TextButton(onPressed: () => Navigator.of(dctx).pop(2), child: const Text('ส่งออกไฟล์…')),
+          TextButton(
+            onPressed: () => Navigator.of(dctx).pop(1),
+            child: Text('บันทึกเข้าคลัง', style: TextStyle(color: th.c, fontWeight: FontWeight.bold)),
+          ),
+        ],
       ),
     );
-    if (ok != true) return;
-    try {
-      final path = await FilePicker.platform.saveFile(
-        dialogTitle: 'บันทึก BIN ใหม่',
-        fileName: name,
-        type: FileType.any,
-        bytes: Uint8List.fromList(s.bin!),
-      );
-      if (path == null) {
-        _snack('ยกเลิกการบันทึก');
-        return;
+    final name = BinLib.clean(tc.text);
+    tc.dispose();
+    if (act == null || act == 0) return;
+    if (name.isEmpty) {
+      _snack('ตั้งชื่อไฟล์ก่อน');
+      return;
+    }
+    final bytes = Uint8List.fromList(s.bin!);
+    if (act == 1) {
+      try {
+        await BinLib.i.load();
+        if (!mounted) return;
+        if (BinLib.i.exists(name) && !await askYes(context, 'ชื่อซ้ำ', 'มีไฟล์ชื่อ "$name" ในคลังแล้ว เขียนทับหรือไม่?', ok: 'เขียนทับ')) return;
+        await BinLib.i.save(name, bytes);
+        _snack('บันทึกเข้าคลังแล้ว: $name — แฟลชได้ที่หน้า FLASH ECU');
+      } catch (e) {
+        _snack('บันทึกไม่สำเร็จ: $e');
       }
-      _snack('บันทึกแล้ว: $path');
+      return;
+    }
+    try {
+      final path = await FilePicker.platform.saveFile(dialogTitle: 'ส่งออก BIN', fileName: '$name.bin', type: FileType.any, bytes: bytes);
+      _snack(path == null ? 'ยกเลิกการส่งออก' : 'ส่งออกแล้ว: $path');
     } catch (e) {
-      _snack('บันทึกไม่สำเร็จ: $e');
+      _snack('ส่งออกไม่สำเร็จ: $e');
+    }
+  }
+
+  Future<void> _openFromLib() async {
+    if (s.changedBytes > 0 && !await _confirm('เปิด BIN จากคลัง', 'การแก้ไขที่ยังไม่ได้ SAVE จะหายไป', ok: 'เปิดไฟล์')) return;
+    if (!mounted) return;
+    final e = await pickFromLibrary(context);
+    if (e == null) return;
+    try {
+      final b = await BinLib.i.read(e);
+      s.loadBin('${e.name}.bin', b);
+      setState(_resetView);
+    } catch (err) {
+      _snack('อ่านไฟล์ไม่ได้: $err');
     }
   }
 
@@ -3778,6 +3898,9 @@ class _TunePageState extends State<TunePage> {
             case 2:
               _openXdf();
               break;
+            case 5:
+              _openFromLib();
+              break;
             case 3:
               if (t != null) {
                 final n = s.revert(t, _cells, 'คืนค่าเดิม ${_cells.length} ช่อง');
@@ -3793,6 +3916,7 @@ class _TunePageState extends State<TunePage> {
         },
         itemBuilder: (_) => [
           PopupMenuItem(value: 1, child: _menuRow(Icons.memory, 'เปิดไฟล์ BIN…', s.binName ?? 'ยังไม่ได้เปิด', th)),
+          PopupMenuItem(value: 5, child: _menuRow(Icons.folder_open, 'เปิด BIN จากคลัง…', 'ไฟล์ที่บันทึกไว้ในแอพ', th)),
           PopupMenuItem(value: 2, child: _menuRow(Icons.description, 'เปิดไฟล์ XDF…', s.xdfName ?? 'ยังไม่ได้เปิด', th)),
           const PopupMenuDivider(),
           PopupMenuItem(enabled: cellsChanged, value: 3, child: _menuRow(Icons.restore, 'คืนค่าเดิมช่องที่เลือก', '', th)),
@@ -3985,6 +4109,7 @@ class _TunePageState extends State<TunePage> {
           const Text('เปิดไฟล์ BIN และ XDF เพื่อเริ่มจูน', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
           const SizedBox(height: 10),
           row('BIN', s.binName, _openBin),
+          Padding(padding: const EdgeInsets.only(left: 28), child: _tb(th, const Text('เปิด BIN จากคลัง'), _openFromLib)),
           row('XDF', s.xdfName, _openXdf),
           const SizedBox(height: 10),
           const Text('แอพแก้ค่าในไฟล์ BIN เท่านั้น ไม่ได้เขียนลงกล่อง ECU\nSAVE เป็นไฟล์ใหม่ (ไม่ทับต้นฉบับ) แล้วแฟลชด้วยเครื่องมือเดิม',
@@ -4515,4 +4640,827 @@ class _BarsPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_BarsPainter o) => true;
+}
+
+// =====================================================================
+// ===================== คลังไฟล์ BIN + หน้า FLASH ECU ====================
+// =====================================================================
+// คลังไฟล์: เก็บในพื้นที่ของแอพ (Documents/bin_lib/<ชื่อ>.bin + index.json) ตั้งชื่อเองได้
+// หน้า FLASH: เลือกไฟล์จากคลัง -> ใส่ Start Offset + ตำแหน่ง checksum (Fix) ตอนกดแฟลช -> ส่งไฟล์ไปเกจ -> เกจแฟลชเอง
+// เกจต้องเปิดหน้าเตรียมแฟลชอยู่ (SETUP > CONNECT APP > ECU FLASH) ถึงจะรับไฟล์/เริ่มแฟลชได้ (FW 1.0.9 ขึ้นไป)
+
+class BinEntry {
+  String name;
+  int size, sum16, ck8;
+  DateTime time;
+  String offset, cks; // ค่าที่ใช้แฟลชครั้งล่าสุด (จำไว้ให้ ไม่ได้ใส่อัตโนมัติจากที่อื่น)
+  bool fix;
+  BinEntry(this.name, this.size, this.sum16, this.ck8, this.time, {this.offset = '', this.cks = '', this.fix = false});
+
+  static BinEntry make(String name, Uint8List b, {BinEntry? keep}) {
+    int s = 0;
+    for (final x in b) {
+      s += x;
+    }
+    return BinEntry(name, b.length, s & 0xFFFF, s & 0xFF, DateTime.now(),
+        offset: keep?.offset ?? '', cks: keep?.cks ?? '', fix: keep?.fix ?? false);
+  }
+
+  Map<String, dynamic> toJson() =>
+      {'n': name, 's': size, 'sum': sum16, 'ck': ck8, 't': time.millisecondsSinceEpoch, 'o': offset, 'c': cks, 'f': fix};
+
+  static BinEntry? fromJson(dynamic j) {
+    try {
+      return BinEntry(j['n'] as String, (j['s'] as num).toInt(), (j['sum'] as num).toInt(), (j['ck'] as num).toInt(),
+          DateTime.fromMillisecondsSinceEpoch((j['t'] as num).toInt()),
+          offset: (j['o'] as String?) ?? '', cks: (j['c'] as String?) ?? '', fix: (j['f'] as bool?) ?? false);
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
+class BinLib extends ChangeNotifier {
+  static final BinLib i = BinLib._();
+  BinLib._();
+
+  io.Directory? _dir;
+  final List<BinEntry> items = [];
+  bool loaded = false;
+
+  Future<io.Directory> _d() async {
+    if (_dir != null) return _dir!;
+    final base = await getApplicationDocumentsDirectory();
+    final d = io.Directory('${base.path}/bin_lib');
+    if (!await d.exists()) await d.create(recursive: true);
+    return _dir = d;
+  }
+
+  io.File _f(io.Directory d, String name) => io.File('${d.path}/$name.bin');
+
+  static String clean(String s) => s.replaceAll(RegExp(r'[\\/:*?"<>|\x00-\x1F]'), '_').trim();
+
+  Future<void> load({bool force = false}) async {
+    if (loaded && !force) return;
+    try {
+      final d = await _d();
+      final m = <String, BinEntry>{};
+      final idx = io.File('${d.path}/index.json');
+      if (await idx.exists()) {
+        for (final j in jsonDecode(await idx.readAsString()) as List) {
+          final e = BinEntry.fromJson(j);
+          if (e != null) m[e.name] = e;
+        }
+      }
+      await for (final f in d.list()) {
+        if (f is io.File && f.path.toLowerCase().endsWith('.bin')) {
+          final n = f.uri.pathSegments.last;
+          final name = n.substring(0, n.length - 4);
+          if (!m.containsKey(name)) m[name] = BinEntry.make(name, await f.readAsBytes());
+        }
+      }
+      items
+        ..clear()
+        ..addAll(m.values.where((e) => _f(d, e.name).existsSync()));
+      items.sort((a, b) => b.time.compareTo(a.time));
+      loaded = true;
+      notifyListeners();
+    } catch (_) {}
+  }
+
+  Future<void> _saveIdx() async {
+    final d = await _d();
+    await io.File('${d.path}/index.json').writeAsString(jsonEncode(items.map((e) => e.toJson()).toList()));
+  }
+
+  bool exists(String name) => items.any((e) => e.name == name);
+
+  Future<BinEntry> save(String name, Uint8List bytes) async {
+    await load();
+    name = clean(name);
+    final d = await _d();
+    await _f(d, name).writeAsBytes(bytes, flush: true);
+    BinEntry? old;
+    for (final e in items) {
+      if (e.name == name) old = e;
+    }
+    items.removeWhere((e) => e.name == name);
+    final e = BinEntry.make(name, bytes, keep: old);
+    items.insert(0, e);
+    await _saveIdx();
+    notifyListeners();
+    return e;
+  }
+
+  Future<Uint8List> read(BinEntry e) async => _f(await _d(), e.name).readAsBytes();
+
+  Future<void> remove(BinEntry e) async {
+    final d = await _d();
+    try {
+      await _f(d, e.name).delete();
+    } catch (_) {}
+    items.remove(e);
+    await _saveIdx();
+    notifyListeners();
+  }
+
+  Future<String?> rename(BinEntry e, String to) async {
+    to = clean(to);
+    if (to.isEmpty) return 'ชื่อว่าง';
+    if (to == e.name) return null;
+    if (exists(to)) return 'มีชื่อ "$to" อยู่แล้ว';
+    final d = await _d();
+    await _f(d, e.name).rename(_f(d, to).path);
+    e.name = to;
+    await _saveIdx();
+    notifyListeners();
+    return null;
+  }
+
+  Future<void> update(BinEntry e) async {
+    await _saveIdx();
+    notifyListeners();
+  }
+}
+
+// ---------- ข้อความสถานะแฟลช (ตรงกับ EcuFlash.h ในเกจ) ----------
+const kFlPhase = [
+  'ไม่ได้อยู่หน้าเตรียมแฟลช', 'รอรับไฟล์', 'กำลังรับไฟล์', 'พร้อมแฟลช', 'กำลังเข้าโหมดเขียน', 'รอเตรียมลบ (11 วินาที)',
+  'กำลังลบข้อมูลเดิม', 'กำลังเขียนข้อมูล', 'กำลังตรวจสอบ', 'แฟลชสำเร็จ', 'แฟลชไม่สำเร็จ',
+];
+String flashPhaseText(int p) => p >= 0 && p < kFlPhase.length ? kFlPhase[p] : 'phase $p';
+String flashEcuText(int s) => switch (s) {
+      0 => 'OFF (สาย K-Line ไม่มีไฟ / ยังไม่บิดกุญแจ)',
+      1 => 'ไม่ตอบ',
+      2 => 'OK',
+      3 => 'FLASH (โหมดเขียน)',
+      4 => 'SECURE',
+      5 => 'RECOVER',
+      6 => 'RECOVER (แบบใหม่)',
+      _ => 'กำลังตรวจ…',
+    };
+String flashErrText(int e) =>
+    const {
+      1: 'เกจยังไม่อยู่หน้าเตรียมแฟลช',
+      2: 'ไม่มีไฟล์ในเกจ หรือไฟล์ไม่ตรงกับในแอพ',
+      3: 'checksum ของไฟล์ไม่ผ่าน (ผลรวมไม่เป็น 0)',
+      4: 'กล่องยังไม่พร้อม (บิดกุญแจ ON ไม่ติดเครื่อง?)',
+      5: 'ลบข้อมูลในกล่องไม่สำเร็จ',
+      6: 'ลบข้อมูลผิดพลาด (erase block error)',
+      7: 'เขียนไม่สำเร็จ (กล่องไม่ตอบบล็อกแรก)',
+      8: 'เขียนไม่สำเร็จ (ส่งซ้ำครบแล้ว)',
+      9: 'กล่องตอบที่อยู่ไม่ตรง',
+      10: 'ตรวจสอบหลังเขียนไม่ผ่าน',
+      11: 'เกจอ่านไฟล์ไม่ได้',
+      12: 'พื้นที่ในเกจไม่พอ',
+      13: 'เกจกำลังทำงานอยู่',
+      14: 'Start Offset / ขนาดไฟล์ไม่ถูกต้อง',
+      15: 'รับไฟล์ไม่สำเร็จ',
+      16: 'สาย K-Line หลุด',
+    }[e] ??
+    'error $e';
+
+String _mmss(int s) => '${(s ~/ 60).toString().padLeft(2, '0')}:${(s % 60).toString().padLeft(2, '0')}';
+String _hx(int v, [int w = 2]) => '0x${v.toRadixString(16).toUpperCase().padLeft(w, '0')}';
+
+int? _parseHex(String s) {
+  var t = s.trim().toLowerCase();
+  if (t.isEmpty) return null;
+  if (t.startsWith('0x')) t = t.substring(2);
+  return int.tryParse(t, radix: 16);
+}
+
+Future<String?> askText(BuildContext context, String title, String initial, {String hint = '', String ok = 'ตกลง'}) async {
+  final tc = TextEditingController(text: initial);
+  final th = Cfg.i.t;
+  final r = await showDialog<String>(
+    context: context,
+    builder: (dctx) => AlertDialog(
+      backgroundColor: const Color(0xFF14141A),
+      title: Text(title, style: TextStyle(fontSize: 15, color: th.c)),
+      content: TextField(
+        controller: tc,
+        autofocus: true,
+        decoration: InputDecoration(hintText: hint, hintStyle: const TextStyle(fontSize: 12, color: Colors.white38)),
+        onSubmitted: (x) => Navigator.of(dctx).pop(x),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.of(dctx).pop(), child: const Text('ยกเลิก')),
+        TextButton(onPressed: () => Navigator.of(dctx).pop(tc.text), child: Text(ok, style: TextStyle(color: th.c))),
+      ],
+    ),
+  );
+  tc.dispose();
+  return r;
+}
+
+Future<bool> askYes(BuildContext context, String title, String msg, {String ok = 'ตกลง', Color col = kAmber}) async {
+  final r = await showDialog<bool>(
+    context: context,
+    builder: (dctx) => AlertDialog(
+      backgroundColor: const Color(0xFF14141A),
+      title: Text(title, style: const TextStyle(fontSize: 16)),
+      content: Text(msg),
+      actions: [
+        TextButton(onPressed: () => Navigator.of(dctx).pop(false), child: const Text('ยกเลิก')),
+        TextButton(onPressed: () => Navigator.of(dctx).pop(true), child: Text(ok, style: TextStyle(color: col))),
+      ],
+    ),
+  );
+  return r == true;
+}
+
+/// บันทึกเข้าคลังโดยถามชื่อ (ถ้าชื่อซ้ำถามก่อนเขียนทับ) ; คืน entry ที่บันทึก
+Future<BinEntry?> saveToLibrary(BuildContext context, Uint8List bytes, String defName) async {
+  await BinLib.i.load();
+  if (!context.mounted) return null;
+  final n0 = await askText(context, 'บันทึกเข้าคลังไฟล์', defName, hint: 'ตั้งชื่อไฟล์', ok: 'บันทึก');
+  if (n0 == null) return null;
+  final n = BinLib.clean(n0);
+  if (n.isEmpty) return null;
+  if (BinLib.i.exists(n) && context.mounted && !await askYes(context, 'ชื่อซ้ำ', 'มีไฟล์ชื่อ "$n" ในคลังแล้ว เขียนทับหรือไม่?', ok: 'เขียนทับ')) {
+    return null;
+  }
+  return BinLib.i.save(n, bytes);
+}
+
+/// เลือกไฟล์จากคลัง
+Future<BinEntry?> pickFromLibrary(BuildContext context) async {
+  await BinLib.i.load();
+  if (!context.mounted) return null;
+  final th = Cfg.i.t;
+  return showDialog<BinEntry>(
+    context: context,
+    builder: (dctx) => AlertDialog(
+      backgroundColor: const Color(0xFF14141A),
+      title: Text('เลือกไฟล์จากคลัง', style: TextStyle(fontSize: 15, color: th.c)),
+      content: SizedBox(
+        width: 480,
+        height: 260,
+        child: BinLib.i.items.isEmpty
+            ? const Center(child: Text('คลังยังว่าง', style: TextStyle(color: Colors.white54)))
+            : ListView(children: [
+                for (final e in BinLib.i.items)
+                  ListTile(
+                    dense: true,
+                    leading: Icon(Icons.memory, color: th.c),
+                    title: Text(e.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+                    subtitle: Text('${(e.size / 1024).toStringAsFixed(1)} KB · ${_dateStr(e.time)}', style: const TextStyle(fontSize: 11)),
+                    onTap: () => Navigator.of(dctx).pop(e),
+                  ),
+              ]),
+      ),
+      actions: [TextButton(onPressed: () => Navigator.of(dctx).pop(), child: const Text('ปิด'))],
+    ),
+  );
+}
+
+String _dateStr(DateTime t) {
+  String p2(int v) => v.toString().padLeft(2, '0');
+  return '${p2(t.day)}/${p2(t.month)}/${t.year} ${p2(t.hour)}:${p2(t.minute)}';
+}
+
+// ---------- หน้า FLASH ECU (แยกจากหน้าเขียนตาราง TUNE) ----------
+class FlashPage extends StatefulWidget {
+  final GaugeController c;
+  const FlashPage({super.key, required this.c});
+  @override
+  State<FlashPage> createState() => _FlashPageState();
+}
+
+class _FlashPageState extends State<FlashPage> {
+  final lib = BinLib.i;
+  GaugeController get c => widget.c;
+  BinEntry? sel;
+  Uint8List? data;
+  final offCtl = TextEditingController(), ckCtl = TextEditingController();
+  bool fix = false;
+  double? up; // ความคืบหน้าส่งไฟล์ไปเกจ
+  bool working = false;
+  String? msg;
+
+  void _rb() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    lib.addListener(_rb);
+    c.addListener(_rb);
+    Cfg.i.addListener(_rb);
+    lib.load();
+  }
+
+  @override
+  void dispose() {
+    lib.removeListener(_rb);
+    c.removeListener(_rb);
+    Cfg.i.removeListener(_rb);
+    offCtl.dispose();
+    ckCtl.dispose();
+    super.dispose();
+  }
+
+  void _snack(String m) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(duration: const Duration(seconds: 3), content: Text(m)));
+  }
+
+  Future<void> _select(BinEntry e) async {
+    try {
+      final b = await lib.read(e);
+      setState(() {
+        sel = e;
+        data = b;
+        offCtl.text = e.offset;
+        ckCtl.text = e.cks;
+        fix = e.fix;
+        msg = null;
+      });
+    } catch (err) {
+      _snack('อ่านไฟล์ไม่ได้: $err');
+    }
+  }
+
+  Future<void> _import() async {
+    try {
+      final r = await FilePicker.platform.pickFiles(type: FileType.any, withData: true);
+      if (r == null || r.files.isEmpty) return;
+      final f = r.files.single;
+      final b = f.bytes;
+      if (b == null || b.isEmpty) {
+        _snack('อ่านไฟล์ไม่ได้');
+        return;
+      }
+      if (!mounted) return;
+      final dot = f.name.lastIndexOf('.');
+      final e = await saveToLibrary(context, b, dot > 0 ? f.name.substring(0, dot) : f.name);
+      if (e != null) await _select(e);
+    } catch (err) {
+      _snack('นำเข้าไม่สำเร็จ: $err');
+    }
+  }
+
+  Future<void> _entryMenu(BinEntry e, int v) async {
+    switch (v) {
+      case 1:
+        final n = await askText(context, 'เปลี่ยนชื่อ', e.name, ok: 'เปลี่ยน');
+        if (n == null) return;
+        final err = await lib.rename(e, n);
+        if (err != null) _snack(err);
+        break;
+      case 2:
+        try {
+          final b = await lib.read(e);
+          final p = await FilePicker.platform.saveFile(dialogTitle: 'ส่งออก BIN', fileName: '${e.name}.bin', type: FileType.any, bytes: b);
+          if (p != null) _snack('ส่งออกแล้ว: $p');
+        } catch (err) {
+          _snack('ส่งออกไม่สำเร็จ: $err');
+        }
+        break;
+      case 3:
+        if (!await askYes(context, 'ลบไฟล์', 'ลบ "${e.name}" ออกจากคลัง?', ok: 'ลบ', col: kBad)) return;
+        await lib.remove(e);
+        if (sel == e) {
+          setState(() {
+            sel = null;
+            data = null;
+          });
+        }
+        break;
+    }
+  }
+
+  // ----- ตรวจไฟล์ตามค่าที่ผู้ใช้ใส่ (ไม่แก้อะไรเองถ้าไม่ได้ติ๊ก Fix) -----
+  ({Uint8List? bytes, bool ok, String text}) _prepared() {
+    final d = data;
+    if (d == null) return (bytes: null, ok: false, text: 'เลือกไฟล์จากคลังก่อน');
+    final b = Uint8List.fromList(d);
+    String fixTxt = '';
+    if (fix) {
+      final ck = _parseHex(ckCtl.text);
+      if (ck == null || ck < 0 || ck >= b.length) return (bytes: null, ok: false, text: 'ตำแหน่ง checksum ไม่ถูกต้อง (0x0 – ${_hx(b.length - 1, 4)})');
+      int s = 0;
+      for (int k = 0; k < b.length; k++) {
+        if (k != ck) s += b[k];
+      }
+      final nv = ((s ^ 0xFF) + 1) & 0xFF;
+      fixTxt = 'Fix ที่ ${_hx(ck)}: ${_hx(b[ck])} → ${_hx(nv)} · ';
+      b[ck] = nv;
+    }
+    int t = 0;
+    for (final x in b) {
+      t += x;
+    }
+    final ok = (t & 0xFF) == 0;
+    return (
+      bytes: b,
+      ok: ok,
+      text: ok ? '${fixTxt}checksum ผ่าน (ผลรวม = 0)' : '${fixTxt}checksum ไม่ผ่าน (ผลรวม ${_hx(t & 0xFF)}) — ติ๊ก Fix แล้วใส่ตำแหน่ง checksum',
+    );
+  }
+
+  String? _offErr(int size) {
+    final o = _parseHex(offCtl.text);
+    if (o == null) return 'ใส่ Start Offset (hex) เช่น 0x8000';
+    if (o % 16 != 0) return 'Start Offset ต้องหาร 16 ลงตัว';
+    if (size % 128 != 0) return 'ขนาดไฟล์ต้องหาร 128 ลงตัว ($size ไบต์)';
+    if ((o >> 4) + (size >> 4) > 0x10000) return 'Start Offset + ขนาดไฟล์ เกินช่วงที่กล่องรับ';
+    return null;
+  }
+
+  // ----- แฟลช -----
+  Future<void> _go() async {
+    final e = sel, d = data;
+    final f = c.t.fl;
+    if (e == null || d == null || f == null) return;
+    final p = _prepared();
+    final off = _parseHex(offCtl.text);
+    if (!p.ok || off == null || _offErr(d.length) != null) return;
+    final bytes = p.bytes!;
+    final sum16 = bytes.fold<int>(0, (a, x) => (a + x) & 0xFFFF);
+    bool ack = false;
+    final ecuOk = f.ecu == 2 || f.ecu == 3 || f.ecu == 5 || f.ecu == 6;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dctx) => StatefulBuilder(
+        builder: (dctx, setD) => AlertDialog(
+          backgroundColor: const Color(0xFF14141A),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: kBad, width: 1.3)),
+          title: const Text('ยืนยันแฟลชกล่อง ECU', style: TextStyle(fontSize: 16, color: kBad, fontWeight: FontWeight.bold)),
+          content: SizedBox(
+            width: 540,
+            child: SingleChildScrollView(
+              child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text('ไฟล์: ${e.name}  (${(bytes.length / 1024).toStringAsFixed(1)} KB)'),
+                Text('Start Offset: ${_hx(off, 4)}'),
+                Text(p.text, style: const TextStyle(color: kGreen)),
+                Text('กล่อง: ${flashEcuText(f.ecu)}${f.ecm != null ? '  ·  ID ${f.ecm!.map((x) => x.toRadixString(16).padLeft(2, '0').toUpperCase()).join(' ')}' : ''}',
+                    style: TextStyle(color: ecuOk ? Colors.white : kAmber)),
+                if (!ecuOk) const Text('กล่องยังไม่อยู่ในสถานะที่แฟลชได้ — เกจจะไม่ยอมเริ่ม', style: TextStyle(color: kAmber)),
+                const SizedBox(height: 10),
+                const Text(
+                    '• บิดกุญแจ ON ห้ามสตาร์ทเครื่อง แบตต้องเต็มหรือต่อเครื่องชาร์จ\n'
+                    '• ห้ามปิดกุญแจ / ถอดสาย ระหว่างแฟลช (ประมาณ 2–3 นาที)\n'
+                    '• ถ้าแฟลชไม่จบ กล่องจะค้างโหมดแฟลช — แฟลชซ้ำจากหน้านี้ได้\n'
+                    '• ควรมีไฟล์เดิมของกล่อง + สาย PC สำรองไว้กู้',
+                    style: TextStyle(fontSize: 12.5, height: 1.4)),
+                InkWell(
+                  onTap: () => setD(() => ack = !ack),
+                  child: Row(children: [
+                    Checkbox(value: ack, activeColor: kBad, onChanged: (v) => setD(() => ack = v ?? false)),
+                    const Expanded(child: Text('เข้าใจความเสี่ยงแล้ว เริ่มแฟลช')),
+                  ]),
+                ),
+              ]),
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(dctx).pop(false), child: const Text('ยกเลิก')),
+            TextButton(
+              onPressed: ack ? () => Navigator.of(dctx).pop(true) : null,
+              child: Text('แฟลช', style: TextStyle(color: ack ? kBad : Colors.white30, fontWeight: FontWeight.bold)),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (ok != true || !mounted) return;
+    e.offset = offCtl.text.trim();
+    e.cks = ckCtl.text.trim();
+    e.fix = fix;
+    lib.update(e);
+    setState(() {
+      working = true;
+      msg = null;
+      up = null;
+    });
+    String? err;
+    final g = c.t.fl;
+    final same = g != null && g.fileSize == bytes.length && g.fileSum == sum16 && g.fileCk8 == 0;
+    if (!same) {
+      setState(() => up = 0);
+      err = await c.sendBin(bytes, (v) {
+        if (mounted) setState(() => up = v);
+      });
+    }
+    if (err == null) {
+      await c.clearFlash();
+      await Future.delayed(const Duration(milliseconds: 300));
+      err = await c.startFlash(off, bytes.length, sum16);
+    }
+    if (err == null) {
+      for (int k = 0; k < 40; k++) {
+        await Future.delayed(const Duration(milliseconds: 200));
+        final h = c.t.fl;
+        if (h == null) break;
+        if (h.busy || h.phase >= 9) break;
+        if (h.err != 0) {
+          err = flashErrText(h.err);
+          break;
+        }
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      working = false;
+      up = null;
+      msg = err;
+    });
+    if (err != null) _snack(err);
+  }
+
+  // ======================= UI =======================
+  @override
+  Widget build(BuildContext context) {
+    final th = Cfg.i.t;
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Stack(fit: StackFit.expand, children: [
+        Image.asset('assets/bg.jpg', fit: BoxFit.cover),
+        Container(color: Colors.black.withOpacity(0.84)),
+        SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(8, 4, 8, 6),
+            child: Column(children: [
+              SizedBox(
+                height: 34,
+                child: Row(children: [
+                  InkWell(
+                    onTap: () => Navigator.of(context).pop(),
+                    child: Row(children: [
+                      Icon(Icons.chevron_left, color: th.c, size: 26),
+                      Text('FLASH ECU', style: TextStyle(fontFamily: kFont, fontSize: 14, color: th.c, shadows: [Shadow(color: th.c, blurRadius: 8)])),
+                    ]),
+                  ),
+                  const SizedBox(width: 12),
+                  const Expanded(
+                    child: Text('แก้ตารางที่หน้า TUNE แล้วบันทึกเข้าคลัง → เลือกไฟล์ที่นี่ → แฟลชผ่านเกจ',
+                        maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 11.5, color: Colors.white54)),
+                  ),
+                ]),
+              ),
+              const SizedBox(height: 6),
+              Expanded(
+                child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                  Expanded(flex: 4, child: _frame(th, _libPanel(th))),
+                  const SizedBox(width: 8),
+                  Expanded(flex: 5, child: _frame(th, _flashPanel(th))),
+                ]),
+              ),
+            ]),
+          ),
+        ),
+      ]),
+    );
+  }
+
+  Widget _frame(AppTheme th, Widget child) => Container(
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: const Color(0xCC060606),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: th.c.withOpacity(0.85), width: 1.1),
+          boxShadow: [BoxShadow(color: th.c.withOpacity(0.3), blurRadius: 10)],
+        ),
+        child: child,
+      );
+
+  Widget _btn(AppTheme th, String s, VoidCallback? f, {IconData? ic, Color? col, bool big = false}) {
+    final cc = col ?? th.c;
+    return Opacity(
+      opacity: f == null ? 0.4 : 1,
+      child: InkWell(
+        onTap: f,
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          padding: EdgeInsets.symmetric(horizontal: 12, vertical: big ? 12 : 7),
+          decoration: BoxDecoration(
+            color: big ? cc.withOpacity(0.25) : Colors.black45,
+            border: Border.all(color: cc, width: 1.4),
+            borderRadius: BorderRadius.circular(8),
+            boxShadow: big && f != null ? [BoxShadow(color: cc.withOpacity(0.45), blurRadius: 12)] : null,
+          ),
+          child: Row(mainAxisSize: MainAxisSize.min, mainAxisAlignment: MainAxisAlignment.center, children: [
+            if (ic != null) ...[Icon(ic, size: big ? 20 : 16, color: cc), const SizedBox(width: 6)],
+            Text(s, style: TextStyle(fontSize: big ? 15 : 12, fontWeight: FontWeight.bold)),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Widget _libPanel(AppTheme th) {
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      Row(children: [
+        Text('คลังไฟล์ BIN', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: th.c2)),
+        const Spacer(),
+        _btn(th, 'นำเข้า', _import, ic: Icons.file_open),
+      ]),
+      const SizedBox(height: 8),
+      Expanded(
+        child: lib.items.isEmpty
+            ? const Center(
+                child: Text('คลังยังว่าง\nบันทึกจากหน้า TUNE (SAVE) หรือกด "นำเข้า"',
+                    textAlign: TextAlign.center, style: TextStyle(color: Colors.white54, fontSize: 12.5)))
+            : ListView(children: [
+                for (final e in lib.items)
+                  InkWell(
+                    onTap: working || (c.t.fl?.busy ?? false) ? null : () => _select(e),
+                    borderRadius: BorderRadius.circular(8),
+                    child: Container(
+                      margin: const EdgeInsets.only(bottom: 5),
+                      padding: const EdgeInsets.fromLTRB(8, 6, 2, 6),
+                      decoration: BoxDecoration(
+                        color: sel == e ? th.c.withOpacity(0.2) : Colors.white.withOpacity(0.03),
+                        border: Border.all(color: sel == e ? th.c : Colors.white12, width: sel == e ? 1.5 : 1),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Row(children: [
+                        Icon(Icons.memory, size: 20, color: th.c2),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                            Text(e.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
+                            Text(
+                                '${(e.size / 1024).toStringAsFixed(1)} KB · ${_dateStr(e.time)} · ผลรวม ${_hx(e.ck8)}${e.ck8 == 0 ? ' ✓' : ''}',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(fontSize: 10.5, color: Colors.white54)),
+                          ]),
+                        ),
+                        PopupMenuButton<int>(
+                          color: const Color(0xFF16161D),
+                          icon: const Icon(Icons.more_vert, size: 18, color: Colors.white54),
+                          onSelected: (v) => _entryMenu(e, v),
+                          itemBuilder: (_) => const [
+                            PopupMenuItem(value: 1, child: Text('เปลี่ยนชื่อ')),
+                            PopupMenuItem(value: 2, child: Text('ส่งออกไฟล์…')),
+                            PopupMenuItem(value: 3, child: Text('ลบ', style: TextStyle(color: kBad))),
+                          ],
+                        ),
+                      ]),
+                    ),
+                  ),
+              ]),
+      ),
+    ]);
+  }
+
+  Widget _row(String a, String b, {Color? col}) => Padding(
+        padding: const EdgeInsets.only(bottom: 3),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          SizedBox(width: 92, child: Text(a, style: const TextStyle(fontSize: 12, color: Colors.white54))),
+          Expanded(child: Text(b, style: TextStyle(fontSize: 12.5, color: col ?? Colors.white))),
+        ]),
+      );
+
+  Widget _field(String label, TextEditingController tc, String hint, {bool enabled = true}) => SizedBox(
+        height: 40,
+        child: TextField(
+          controller: tc,
+          enabled: enabled,
+          onChanged: (_) => setState(() {}),
+          style: const TextStyle(fontSize: 14),
+          decoration: InputDecoration(
+            labelText: label,
+            labelStyle: const TextStyle(fontSize: 12),
+            hintText: hint,
+            hintStyle: const TextStyle(fontSize: 12, color: Colors.white30),
+            isDense: true,
+            border: const OutlineInputBorder(),
+          ),
+        ),
+      );
+
+  Widget _flashPanel(AppTheme th) {
+    final f = c.t.fl;
+    final connected = c.link == LinkState.connected && !c.demo;
+    final busy = f?.busy ?? false;
+    final d = data;
+    final p = _prepared();
+    final offErr = d == null ? null : _offErr(d.length);
+    final sum16 = p.bytes?.fold<int>(0, (a, x) => (a + x) & 0xFFFF);
+    final onGauge = f != null && p.bytes != null && f.fileSize == p.bytes!.length && f.fileSum == sum16;
+    final hint = sel == null ? null : RegExp(r'__([0-9A-Fa-f]+)-([0-9A-Fa-f]+)').firstMatch(sel!.name);
+    final canGo = connected && f != null && f.prep && !busy && f.phase != 2 && !working && d != null && p.ok && offErr == null;
+
+    String gaugeTxt;
+    Color gaugeCol;
+    if (c.demo) {
+      gaugeTxt = 'ปิด DEMO ก่อน แล้วเชื่อมต่อเกจ';
+      gaugeCol = kAmber;
+    } else if (!connected) {
+      gaugeTxt = 'ยังไม่ได้เชื่อมต่อเกจ (กดเชื่อมต่อที่หน้าหลัก)';
+      gaugeCol = kBad;
+    } else if (f == null) {
+      gaugeTxt = 'เฟิร์มแวร์เกจยังไม่รองรับ (ต้อง FW 1.0.9 ขึ้นไป)';
+      gaugeCol = kBad;
+    } else if (!f.prep) {
+      gaugeTxt = 'เปิดที่เกจ: SETUP > CONNECT APP > ECU FLASH';
+      gaugeCol = kAmber;
+    } else {
+      gaugeTxt = 'อยู่หน้าเตรียมแฟลช ✓';
+      gaugeCol = kGreen;
+    }
+
+    // ความคืบหน้า
+    String phase = '';
+    double? prog;
+    String sizeTxt = '', timeTxt = '';
+    if (up != null) {
+      phase = 'กำลังส่งไฟล์ไปเกจ';
+      prog = up;
+      final n = p.bytes?.length ?? 0;
+      sizeTxt = '${(n * up! / 1024).toStringAsFixed(1)} / ${(n / 1024).toStringAsFixed(1)} KB';
+    } else if (f != null && f.prep) {
+      phase = flashPhaseText(f.phase);
+      if (busy || f.phase >= 9) {
+        prog = f.phase == 9 ? 1.0 : f.pct / 100;
+        sizeTxt = '${(f.done / 1024).toStringAsFixed(1)} / ${(f.total / 1024).toStringAsFixed(1)} KB';
+        timeTxt = '${_mmss(f.elapsed)} / เหลือ ${_mmss(f.eta)}';
+      }
+    }
+    final phaseCol = f?.phase == 9 ? kGreen : (f?.phase == 10 ? kBad : Colors.white);
+
+    return SingleChildScrollView(
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Text('สถานะเกจ', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: th.c2)),
+        const SizedBox(height: 4),
+        _row('หน้าเกจ', gaugeTxt, col: gaugeCol),
+        if (f != null && f.prep) ...[
+          _row('กล่อง ECU', '${flashEcuText(f.ecu)}${f.ecm != null ? '  ·  ID ${f.ecm!.map((x) => x.toRadixString(16).padLeft(2, '0').toUpperCase()).join(' ')}' : ''}',
+              col: (f.ecu == 2 || f.ecu == 3) ? kGreen : ((f.ecu == 5 || f.ecu == 6) ? kAmber : Colors.white70)),
+          _row('ไฟล์ในเกจ',
+              f.fileSize > 0 ? '${(f.fileSize / 1024).toStringAsFixed(1)} KB · sum ${_hx(f.fileSum, 4)}${onGauge ? ' (ตรงกับไฟล์ที่เลือก)' : ''}' : 'ยังไม่มี'),
+          if (f.batt != null) _row('แบต (ล่าสุด)', '${f.batt!.toStringAsFixed(1)} V', col: f.batt! < 12.0 ? kAmber : Colors.white),
+        ],
+        const Divider(color: Colors.white12, height: 16),
+        Text(sel == null ? 'เลือกไฟล์จากคลังทางซ้าย' : 'ไฟล์: ${sel!.name}',
+            maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: th.c2)),
+        const SizedBox(height: 8),
+        Row(children: [
+          Expanded(child: _field('Start Offset (hex)', offCtl, 'เช่น 0x8000', enabled: !busy && !working)),
+          const SizedBox(width: 8),
+          InkWell(
+            onTap: busy || working ? null : () => setState(() => fix = !fix),
+            child: Row(children: [
+              Checkbox(value: fix, activeColor: th.c, onChanged: busy || working ? null : (v) => setState(() => fix = v ?? false)),
+              const Text('Fix checksum', style: TextStyle(fontSize: 12.5)),
+            ]),
+          ),
+          const SizedBox(width: 6),
+          SizedBox(width: 110, child: _field('ตำแหน่ง (hex)', ckCtl, 'เช่น 0x0', enabled: fix && !busy && !working)),
+        ]),
+        if (hint != null && !busy && !working)
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: InkWell(
+              onTap: () => setState(() {
+                offCtl.text = '0x${hint.group(1)!.toUpperCase()}';
+                ckCtl.text = '0x${hint.group(2)!.toUpperCase()}';
+                fix = true;
+              }),
+              child: Text('ชื่อไฟล์บอก offset 0x${hint.group(1)!.toUpperCase()} / checksum 0x${hint.group(2)!.toUpperCase()} — แตะเพื่อใช้ค่านี้',
+                  style: TextStyle(fontSize: 11.5, color: th.c, decoration: TextDecoration.underline)),
+            ),
+          ),
+        const SizedBox(height: 6),
+        if (d != null) ...[
+          Text(p.text, style: TextStyle(fontSize: 12, color: p.ok ? kGreen : kAmber)),
+          if (offErr != null) Text(offErr, style: const TextStyle(fontSize: 12, color: kAmber)),
+        ],
+        const SizedBox(height: 10),
+        _btn(th, busy ? 'กำลังแฟลช…' : 'แฟลชลงกล่อง ECU', canGo ? _go : null, ic: Icons.bolt, col: kBad, big: true),
+        const SizedBox(height: 10),
+        if (phase.isNotEmpty) ...[
+          Row(children: [
+            Expanded(child: Text(phase, style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: phaseCol))),
+            if (prog != null) Text('${(prog * 100).round()}%', style: const TextStyle(fontFamily: kFont, fontSize: 13)),
+          ]),
+          const SizedBox(height: 4),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(3),
+            child: LinearProgressIndicator(value: prog, minHeight: 8, color: phaseCol == Colors.white ? th.c : phaseCol, backgroundColor: Colors.white12),
+          ),
+          const SizedBox(height: 4),
+          Row(children: [
+            Text(sizeTxt, style: const TextStyle(fontSize: 12, color: Colors.white70)),
+            const Spacer(),
+            Text(timeTxt, style: const TextStyle(fontSize: 12, color: Colors.white70)),
+          ]),
+        ],
+        if (busy) const Text('ห้ามปิดกุญแจ / ถอดสาย — ออกจากหน้านี้ได้ เกจแฟลชต่อเอง', style: TextStyle(fontSize: 12, color: kBad)),
+        if (f != null && f.err != 0) Text('เกจแจ้ง: ${flashErrText(f.err)}', style: const TextStyle(fontSize: 12, color: kBad)),
+        if (msg != null) Text(msg!, style: const TextStyle(fontSize: 12, color: kBad)),
+        if (f != null && f.phase == 9)
+          const Text('แฟลชสำเร็จ — ปิดกุญแจ ~10 วินาทีแล้วเปิดใหม่ ก่อนสตาร์ทเครื่อง', style: TextStyle(fontSize: 12.5, color: kGreen)),
+        if (f != null && (f.phase == 9 || f.phase == 10) && !working)
+          Padding(padding: const EdgeInsets.only(top: 6), child: Align(alignment: Alignment.centerLeft, child: _btn(th, 'ล้างผล', () => c.clearFlash()))),
+      ]),
+    );
+  }
 }
