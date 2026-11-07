@@ -6,12 +6,14 @@ import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart' show defaultTargetPlatform, TargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:file_picker/file_picker.dart' show FilePicker, FileType;
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:xml/xml.dart' show XmlDocument, XmlElement;
 
 // ---------- BLE UUIDs (ต้องตรงกับ BleGauge.h) ----------
 final Guid kSvc = Guid('7a0f0001-5a41-5201-9c11-2a52a1c0de01');
@@ -1109,6 +1111,10 @@ class _GaugePageState extends State<GaugePage> {
                     () => c.link == LinkState.connected ? c.disconnect() : c.connect(), th),
                 const SizedBox(width: 6),
                 _btn('DEMO', c.toggleDemo, th, active: c.demo),
+                const SizedBox(width: 6),
+                _iconBtn(Icons.tune, th, () {
+                  Navigator.of(context).push(MaterialPageRoute(builder: (_) => TunePage(c: c)));
+                }),
                 const SizedBox(width: 6),
                 _iconBtn(Icons.settings, th, () {
                   Navigator.of(context).push(MaterialPageRoute(builder: (_) => SettingsPage(c: c)));
@@ -2295,4 +2301,2218 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
         ),
       );
+}
+
+// =====================================================================
+// ===================== หน้า TUNE : ตารางจูน BIN / XDF ==================
+// =====================================================================
+// เปิดไฟล์ BIN (ข้อมูลกล่อง) + XDF (TunerPro XML บอกตำแหน่ง/สูตรของแต่ละตาราง) แล้วแก้ค่าในแอพ
+// - ชื่อไทยใน XDF เป็น TIS-620 ใน &#NNN; (0xA1–0xFB) -> แปลงเป็น Unicode (U+0E01..)
+// - mmedtypeflags: 0x01 = มีเครื่องหมาย, 0x02 = LSB first (little-endian), 0x04 = เรียงตามคอลัมน์
+// - mmedmajorstridebits > 0 = ระยะห่างระหว่างช่อง (บิต) (ข้อมูล Honda สลับค่า/slope)
+// - แกนลิงก์ไปตารางอื่นผ่าน <embedinfo type="3" linkobjid=...>
+// แอพเขียนค่าลงกล่อง ECU ไม่ได้ (FW อ่าน K-Line อย่างเดียว) -> SAVE เป็นไฟล์ BIN ใหม่ แล้วแฟลชด้วยเครื่องมือเดิม
+// ยังไม่รู้วิธีคำนวณ checksum ของกล่องรุ่นนี้ -> แอพไม่แก้ checksum ให้ (เตือนทุกครั้งตอน SAVE)
+
+typedef _Fn = double Function(double x);
+
+int _pi(String? s, [int d = 0]) {
+  if (s == null) return d;
+  final t = s.trim();
+  if (t.isEmpty) return d;
+  final neg = t.startsWith('-');
+  final u = neg ? t.substring(1) : t;
+  final v = (u.startsWith('0x') || u.startsWith('0X')) ? int.tryParse(u.substring(2), radix: 16) : int.tryParse(u);
+  if (v == null) return d;
+  return neg ? -v : v;
+}
+
+double? _pd(String? s) => s == null ? null : double.tryParse(s.trim());
+
+/// ตัดเลข 0 ท้ายทศนิยม เช่น 0.3572 / 0.001 / 1
+String _numStr(double v) {
+  var s = v.toStringAsFixed(4);
+  if (s.contains('.')) {
+    s = s.replaceAll(RegExp(r'0+$'), '');
+    s = s.replaceAll(RegExp(r'\.$'), '');
+  }
+  return s;
+}
+
+/// TIS-620 -> Unicode (เฉพาะข้อความที่ยังไม่ใช่ Unicode ไทย)
+String _tis(String s) {
+  if (s.runes.any((r) => r > 0xFF)) return s.replaceAll(RegExp(r'\s+'), ' ').trim();
+  final b = StringBuffer();
+  for (final r in s.runes) {
+    b.writeCharCode(r >= 0xA1 && r <= 0xFB ? r + 0x0D60 : r);
+  }
+  return b.toString().replaceAll(RegExp(r'\s+'), ' ').trim();
+}
+
+/// สีไล่ตามค่า น้ำเงิน -> ฟ้า -> เขียว -> เหลือง -> ส้ม -> แดง
+Color _heat(double t) {
+  if (t.isNaN) t = 0.5;
+  t = t.clamp(0.0, 1.0).toDouble();
+  const stops = <Color>[
+    Color(0xFF2B45D8), Color(0xFF1FA8E8), Color(0xFF2ED47A), Color(0xFFF2D22E), Color(0xFFF0641E), Color(0xFFD81B3C),
+  ];
+  final p = t * (stops.length - 1);
+  final i = p.floor().clamp(0, stops.length - 2).toInt();
+  return Color.lerp(stops[i], stops[i + 1], p - i)!;
+}
+
+// ---------- สมการ XDF เช่น "X*.3572 -15.72" : + - * / วงเล็บ ตัวแปร X ----------
+class XdfEq {
+  final String src;
+  final _Fn f;
+  final bool ok, linear;
+  final double a, b; // ถ้าเป็นเส้นตรง: ค่า = a*ดิบ + b
+
+  XdfEq._(this.src, this.f, this.ok, this.linear, this.a, this.b);
+
+  static double _ident(double x) => x;
+
+  factory XdfEq(String? s) {
+    final src = (s == null || s.trim().isEmpty) ? 'X' : s.trim();
+    _Fn fn;
+    bool ok = true;
+    try {
+      fn = _EqParser(src).parse();
+      if (fn(1.0).isNaN) throw const FormatException('nan');
+    } catch (_) {
+      fn = _ident;
+      ok = false;
+    }
+    final b = fn(0), a = fn(1) - b, t = fn(1000);
+    final lin = (t - (a * 1000 + b)).abs() <= 1e-6 * math.max(1.0, t.abs());
+    return XdfEq._(src, fn, ok, lin, a, b);
+  }
+
+  /// ค่าที่แสดง -> ค่าดิบ (ยังไม่ปัด)
+  double inv(double v, double lo, double hi) {
+    if (linear && a != 0) return (v - b) / a;
+    double l = lo, h = hi;
+    final up = f(h) >= f(l);
+    for (int i = 0; i < 60; i++) {
+      final m = (l + h) / 2;
+      if ((f(m) < v) == up) {
+        l = m;
+      } else {
+        h = m;
+      }
+    }
+    return (l + h) / 2;
+  }
+
+  /// ค่าที่เปลี่ยนต่อ 1 ค่าดิบ (ใช้เป็นระยะ STEP ของปุ่ม − +)
+  double get lsb {
+    final d = linear ? a.abs() : (f(1) - f(0)).abs();
+    return d == 0 || d.isNaN ? 1.0 : d;
+  }
+}
+
+class _EqParser {
+  final String s;
+  int i = 0;
+  _EqParser(this.s);
+
+  _Fn parse() {
+    final e = _expr();
+    _ws();
+    if (i != s.length) throw FormatException('eq', s, i);
+    return e;
+  }
+
+  void _ws() {
+    while (i < s.length && (s[i] == ' ' || s[i] == '\t')) {
+      i++;
+    }
+  }
+
+  _Fn _expr() {
+    var l = _term();
+    while (true) {
+      _ws();
+      if (i >= s.length || (s[i] != '+' && s[i] != '-')) return l;
+      final op = s[i++];
+      final r = _term(), a = l;
+      if (op == '+') {
+        l = (x) => a(x) + r(x);
+      } else {
+        l = (x) => a(x) - r(x);
+      }
+    }
+  }
+
+  _Fn _term() {
+    var l = _unary();
+    while (true) {
+      _ws();
+      if (i >= s.length || (s[i] != '*' && s[i] != '/')) return l;
+      final op = s[i++];
+      final r = _unary(), a = l;
+      if (op == '*') {
+        l = (x) => a(x) * r(x);
+      } else {
+        l = (x) => a(x) / r(x);
+      }
+    }
+  }
+
+  _Fn _unary() {
+    _ws();
+    if (i < s.length && s[i] == '-') {
+      i++;
+      final u = _unary();
+      return (x) => -u(x);
+    }
+    if (i < s.length && s[i] == '+') {
+      i++;
+      return _unary();
+    }
+    return _atom();
+  }
+
+  _Fn _atom() {
+    _ws();
+    if (i >= s.length) throw FormatException('eq', s, i);
+    final ch = s[i];
+    if (ch == '(') {
+      i++;
+      final e = _expr();
+      _ws();
+      if (i < s.length && s[i] == ')') i++;
+      return e;
+    }
+    if (ch == 'X' || ch == 'x') {
+      i++;
+      return (x) => x;
+    }
+    final m = RegExp(r'(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?').matchAsPrefix(s, i);
+    if (m == null) throw FormatException('eq', s, i);
+    i = m.end;
+    final v = double.parse(m.group(0)!);
+    return (_) => v;
+  }
+}
+
+// ---------- ตำแหน่งข้อมูลใน BIN (EMBEDDEDDATA) ----------
+class XdfData {
+  final int addr, bits, rows, cols, stride; // stride = ระยะระหว่างช่อง (ไบต์)
+  final bool lsb, signed, colMajor;
+  XdfData({
+    required this.addr, required this.bits, required this.rows, required this.cols, required this.stride,
+    required this.lsb, required this.signed, required this.colMajor,
+  });
+
+  int get bytes => math.max(1, bits ~/ 8);
+  int get count => rows * cols;
+  int addrOf(int r, int c) => addr + (colMajor ? c * rows + r : r * cols + c) * stride;
+  int addrAt(int k) => addr + k * stride;
+  int get span => (count - 1) * stride + bytes;
+
+  static XdfData? from(XmlElement? e, _XdfDefaults d, int base) {
+    if (e == null) return null;
+    final a = e.getAttribute('mmedaddress');
+    if (a == null) return null;
+    final bits = math.max(8, _pi(e.getAttribute('mmedelementsizebits'), d.bits));
+    final tf = e.getAttribute('mmedtypeflags');
+    final fl = tf == null ? ((d.signed ? 1 : 0) | (d.lsb ? 2 : 0)) : _pi(tf);
+    final ms = _pi(e.getAttribute('mmedmajorstridebits'));
+    final eb = math.max(1, bits ~/ 8);
+    return XdfData(
+      addr: _pi(a) + base,
+      bits: bits,
+      rows: math.max(1, _pi(e.getAttribute('mmedrowcount'), 1)),
+      cols: math.max(1, _pi(e.getAttribute('mmedcolcount'), 1)),
+      stride: ms > 0 ? math.max(1, ms ~/ 8) : eb,
+      lsb: (fl & 0x02) != 0,
+      signed: (fl & 0x01) != 0,
+      colMajor: (fl & 0x04) != 0,
+    );
+  }
+}
+
+class _XdfDefaults {
+  final int bits;
+  final bool lsb, signed;
+  const _XdfDefaults(this.bits, this.lsb, this.signed);
+}
+
+class XdfAxis {
+  final List<String> labels;
+  final int? link;
+  final XdfData? data;
+  final XdfEq eq;
+  final int dec;
+  XdfAxis(this.labels, this.link, this.data, this.eq, this.dec);
+}
+
+class XdfTable {
+  final int uid;
+  final String title;
+  final XdfData z;
+  final XdfEq eq;
+  final int dec, outType;
+  final double? min, max;
+  final XdfAxis x, y;
+  bool valid = true; // อยู่ในขนาดไฟล์ BIN หรือไม่
+  XdfTable(this.uid, this.title, this.z, this.eq, this.dec, this.outType, this.min, this.max, this.x, this.y);
+
+  int get rows => z.rows;
+  int get cols => z.cols;
+  bool get is2D => rows > 1 && cols > 1;
+  bool get isLock {
+    final t = title.toLowerCase();
+    return t.contains('ล็อค') || t.contains('ล็อก') || t.contains('lock');
+  }
+
+  String fmt(double v) {
+    if (v.isNaN) return '--';
+    if (outType == 3) return '0x${v.round().toRadixString(16).toUpperCase().padLeft(2, '0')}';
+    return v.toStringAsFixed(dec.clamp(0, 6).toInt());
+  }
+}
+
+class XdfFlag {
+  final int uid;
+  final String title;
+  final XdfData d;
+  final int mask;
+  bool valid = true;
+  XdfFlag(this.uid, this.title, this.d, this.mask);
+}
+
+class XdfError implements Exception {
+  final String msg;
+  XdfError(this.msg);
+  @override
+  String toString() => msg;
+}
+
+class XdfDef {
+  final List<XdfTable> tables;
+  final List<XdfFlag> flags;
+  final Map<int, XdfTable> byId;
+  XdfDef(this.tables, this.flags) : byId = {for (final t in tables) t.uid: t};
+
+  static XdfDef parse(Uint8List bytes) {
+    String txt;
+    try {
+      txt = utf8.decode(bytes);
+    } catch (_) {
+      txt = latin1.decode(bytes);
+    }
+    if (txt.startsWith('﻿')) txt = txt.substring(1);
+    if (!txt.trimLeft().startsWith('<')) {
+      throw XdfError('ไฟล์ XDF นี้ไม่ใช่ XML (น่าจะถูกเข้ารหัส) — ใช้ไฟล์ที่ปลดล็อกแล้ว เช่น K03-H01_unlock.xdf');
+    }
+    XmlDocument doc;
+    try {
+      doc = XmlDocument.parse(txt);
+    } catch (e) {
+      throw XdfError('อ่าน XDF ไม่ได้: $e');
+    }
+    final root = doc.rootElement;
+    if (root.name.local != 'XDFFORMAT') throw XdfError('ไม่ใช่ไฟล์ TunerPro XDF (ไม่พบ <XDFFORMAT>)');
+
+    // ค่าตั้งต้น + base offset
+    int base = 0;
+    var defs = const _XdfDefaults(8, false, false);
+    final hdr = root.getElement('XDFHEADER');
+    if (hdr != null) {
+      final bo = hdr.getElement('BASEOFFSET');
+      if (bo != null) {
+        final off = _pi(bo.getAttribute('offset'));
+        base = bo.getAttribute('subtract') == '1' ? -off : off;
+      }
+      final df = hdr.getElement('DEFAULTS');
+      if (df != null) {
+        defs = _XdfDefaults(_pi(df.getAttribute('datasizeinbits'), 8), df.getAttribute('lsbfirst') == '1', df.getAttribute('signed') == '1');
+      }
+    }
+
+    XdfAxis axis(XmlElement? a) {
+      if (a == null) return XdfAxis(const [], null, null, XdfEq('X'), 2);
+      final labels = <String>[];
+      for (final l in a.findElements('LABEL')) {
+        final idx = _pi(l.getAttribute('index'), labels.length);
+        if (idx < 0 || idx > 4096) continue;
+        while (labels.length <= idx) {
+          labels.add('');
+        }
+        labels[idx] = _tis(l.getAttribute('value') ?? '');
+      }
+      int? link;
+      final ei = a.getElement('embedinfo');
+      if (ei != null && ei.getAttribute('type') == '3') {
+        final li = ei.getAttribute('linkobjid');
+        if (li != null && li.trim().isNotEmpty) link = _pi(li);
+      }
+      return XdfAxis(
+        labels,
+        link,
+        XdfData.from(a.getElement('EMBEDDEDDATA'), defs, base),
+        XdfEq(a.getElement('MATH')?.getAttribute('equation')),
+        _pi(a.getElement('decimalpl')?.innerText, 2),
+      );
+    }
+
+    final tables = <XdfTable>[];
+    for (final t in root.findElements('XDFTABLE')) {
+      XmlElement? zx, xx, yx;
+      for (final a in t.findElements('XDFAXIS')) {
+        switch (a.getAttribute('id')) {
+          case 'z':
+            zx = a;
+            break;
+          case 'x':
+            xx = a;
+            break;
+          case 'y':
+            yx = a;
+            break;
+        }
+      }
+      if (zx == null) continue;
+      final zd = XdfData.from(zx.getElement('EMBEDDEDDATA'), defs, base);
+      if (zd == null) continue;
+      final uid = _pi(t.getAttribute('uniqueid'), tables.length + 0x100000);
+      var title = _tis(t.getElement('title')?.innerText ?? '');
+      if (title.isEmpty) title = 'TABLE 0x${uid.toRadixString(16).toUpperCase()}';
+      tables.add(XdfTable(
+        uid, title, zd,
+        XdfEq(zx.getElement('MATH')?.getAttribute('equation')),
+        _pi(zx.getElement('decimalpl')?.innerText, 2),
+        _pi(zx.getElement('outputtype')?.innerText, 1),
+        _pd(zx.getElement('min')?.innerText),
+        _pd(zx.getElement('max')?.innerText),
+        axis(xx), axis(yx),
+      ));
+    }
+
+    final flags = <XdfFlag>[];
+    for (final f in root.findElements('XDFFLAG')) {
+      final d = XdfData.from(f.getElement('EMBEDDEDDATA'), defs, base);
+      if (d == null) continue;
+      final uid = _pi(f.getAttribute('uniqueid'));
+      var title = _tis(f.getElement('title')?.innerText ?? '');
+      if (title.isEmpty) title = 'FLAG 0x${uid.toRadixString(16).toUpperCase()}';
+      flags.add(XdfFlag(uid, title, d, _pi(f.getElement('mask')?.innerText, 1)));
+    }
+    if (tables.isEmpty && flags.isEmpty) throw XdfError('ไม่พบตารางใน XDF นี้');
+    return XdfDef(tables, flags);
+  }
+}
+
+// ---------- ประวัติการแก้ (ย้อนกลับ/ทำซ้ำ) เก็บเป็นไบต์ก่อน/หลัง ----------
+class _Edit {
+  final String label;
+  final List<int> addr, before, after;
+  final int t;
+  _Edit(this.label, this.addr, this.before, this.after, this.t);
+}
+
+/// สถานะไฟล์ที่เปิดอยู่ (คงอยู่แม้ออกจากหน้า TUNE แล้วกลับเข้ามา)
+class TuneSession extends ChangeNotifier {
+  static final TuneSession i = TuneSession._();
+  TuneSession._();
+
+  Uint8List? orig, bin;
+  String? binName, xdfName;
+  XdfDef? xdf;
+  int sel = -1;
+  bool lockOk = false; // ผู้ใช้ยืนยันปลดล็อกการแก้รหัสล็อคกล่องแล้ว (เฉพาะรอบนี้)
+  final List<_Edit> undoList = [], redoList = [];
+  int rev = 0;
+  int _cbRev = -1, _cb = 0;
+
+  bool get ready => bin != null && xdf != null;
+  XdfTable? get table {
+    final d = xdf;
+    if (d == null || sel < 0 || sel >= d.tables.length) return null;
+    return d.tables[sel];
+  }
+
+  void _changed() {
+    rev++;
+    notifyListeners();
+  }
+
+  void loadBin(String name, Uint8List b) {
+    orig = Uint8List.fromList(b);
+    bin = Uint8List.fromList(b);
+    binName = name;
+    undoList.clear();
+    redoList.clear();
+    lockOk = false;
+    _validate();
+    _changed();
+  }
+
+  void loadXdf(String name, XdfDef d) {
+    xdf = d;
+    xdfName = name;
+    sel = -1;
+    undoList.clear();
+    redoList.clear();
+    _validate();
+    _changed();
+  }
+
+  void select(int i) {
+    sel = i;
+    _changed();
+  }
+
+  int get invalidCount => xdf == null || bin == null ? 0 : xdf!.tables.where((t) => !t.valid).length + xdf!.flags.where((f) => !f.valid).length;
+
+  void _validate() {
+    final d = xdf;
+    if (d == null) return;
+    final n = bin?.length;
+    bool ok(XdfData z) => n == null || (z.addr >= 0 && z.addr + z.span <= n);
+    for (final t in d.tables) {
+      t.valid = ok(t.z);
+    }
+    for (final f in d.flags) {
+      f.valid = ok(f.d);
+    }
+    if (sel < 0 || sel >= d.tables.length || !d.tables[sel].valid) {
+      sel = d.tables.indexWhere((t) => t.valid && t.is2D);
+      if (sel < 0) sel = d.tables.indexWhere((t) => t.valid);
+    }
+  }
+
+  int rawAt(Uint8List src, XdfData d, int a) {
+    final n = d.bytes;
+    int v = 0;
+    for (int k = 0; k < n; k++) {
+      final p = a + (d.lsb ? k : n - 1 - k);
+      v |= ((p >= 0 && p < src.length) ? src[p] : 0) << (8 * k);
+    }
+    if (d.signed && v >= (1 << (n * 8 - 1))) v -= (1 << (n * 8));
+    return v;
+  }
+
+  double val(XdfTable t, int r, int c, {bool original = false}) =>
+      t.eq.f(rawAt(original ? orig! : bin!, t.z, t.z.addrOf(r, c)).toDouble());
+
+  List<List<double>> values(XdfTable t) => [
+        for (int r = 0; r < t.rows; r++) [for (int c = 0; c < t.cols; c++) val(t, r, c)],
+      ];
+
+  bool _rangeChanged(int a, int n) {
+    final b = bin, o = orig;
+    if (b == null || o == null) return false;
+    for (int k = 0; k < n; k++) {
+      final p = a + k;
+      if (p >= 0 && p < b.length && b[p] != o[p]) return true;
+    }
+    return false;
+  }
+
+  bool cellChanged(XdfTable t, int r, int c) => _rangeChanged(t.z.addrOf(r, c), t.z.bytes);
+
+  bool tableChanged(XdfTable t) {
+    for (int r = 0; r < t.rows; r++) {
+      for (int c = 0; c < t.cols; c++) {
+        if (cellChanged(t, r, c)) return true;
+      }
+    }
+    return false;
+  }
+
+  int get changedBytes {
+    if (_cbRev == rev) return _cb;
+    final b = bin, o = orig;
+    int n = 0;
+    if (b != null && o != null) {
+      for (int k = 0; k < b.length; k++) {
+        if (b[k] != o[k]) n++;
+      }
+    }
+    _cbRev = rev;
+    _cb = n;
+    return n;
+  }
+
+  /// ค่าแกน (ตัวเลข) ถ้าแกนลิงก์ไปตารางอื่นหรืออ่านจาก BIN เอง ; แกนที่เป็นแค่ป้ายชื่อ = null
+  List<double>? axisNums(XdfTable t, bool isX) {
+    final ax = isX ? t.x : t.y;
+    final n = isX ? t.cols : t.rows;
+    final d = xdf, b = bin;
+    if (d == null || b == null) return null;
+    if (ax.link != null) {
+      final lt = d.byId[ax.link];
+      if (lt != null && lt.valid && lt != t) {
+        final v = <double>[];
+        for (int r = 0; r < lt.rows; r++) {
+          for (int c = 0; c < lt.cols; c++) {
+            v.add(val(lt, r, c));
+          }
+        }
+        return [for (int k = 0; k < n; k++) k < v.length ? v[k] : double.nan];
+      }
+    }
+    final ad = ax.data;
+    if (ad != null && ad.addr >= 0 && ad.addr + ad.span <= b.length) {
+      return [for (int k = 0; k < n; k++) k < ad.count ? ax.eq.f(rawAt(b, ad, ad.addrAt(k)).toDouble()) : double.nan];
+    }
+    return null;
+  }
+
+  int _axisDec(XdfTable t, bool isX) {
+    final ax = isX ? t.x : t.y;
+    final lt = ax.link == null ? null : xdf?.byId[ax.link];
+    return (lt?.dec ?? ax.dec).clamp(0, 6).toInt();
+  }
+
+  List<String> axisLabels(XdfTable t, bool isX) {
+    final n = isX ? t.cols : t.rows;
+    final nums = axisNums(t, isX);
+    if (nums != null) {
+      final dec = _axisDec(t, isX);
+      return [for (final v in nums) v.isNaN ? '-' : v.toStringAsFixed(dec)];
+    }
+    final ax = isX ? t.x : t.y;
+    return [for (int k = 0; k < n; k++) (k < ax.labels.length && ax.labels[k].isNotEmpty) ? ax.labels[k] : '${k + 1}'];
+  }
+
+  // ----- เขียนค่า -----
+  void _rawBytes(XdfData d, int a, int raw, List<int> addr, List<int> before, List<int> after) {
+    final b = bin!;
+    final n = d.bytes;
+    final u = raw < 0 ? raw + (1 << (n * 8)) : raw;
+    for (int k = 0; k < n; k++) {
+      final p = a + (d.lsb ? k : n - 1 - k);
+      if (p < 0 || p >= b.length) continue;
+      final nv = (u >> (8 * k)) & 0xFF;
+      if (b[p] != nv) {
+        addr.add(p);
+        before.add(b[p]);
+        after.add(nv);
+      }
+    }
+  }
+
+  /// เขียนค่า (หน่วยที่แสดง) หลายช่อง ; คืนจำนวนไบต์ที่เปลี่ยน
+  int write(XdfTable t, Map<(int, int), double> vals, String label, {bool merge = false}) {
+    if (bin == null) return 0;
+    final d = t.z;
+    final nb = d.bytes * 8;
+    final maxRaw = d.signed ? (1 << (nb - 1)) - 1 : (1 << nb) - 1;
+    final minRaw = d.signed ? -(1 << (nb - 1)) : 0;
+    final addr = <int>[], before = <int>[], after = <int>[];
+    vals.forEach((rc, v) {
+      final x = t.eq.inv(v, minRaw.toDouble(), maxRaw.toDouble());
+      if (!x.isFinite) return;
+      final raw = x.round().clamp(minRaw, maxRaw).toInt();
+      _rawBytes(d, d.addrOf(rc.$1, rc.$2), raw, addr, before, after);
+    });
+    return _commit(label, addr, before, after, merge);
+  }
+
+  int _commit(String label, List<int> addr, List<int> before, List<int> after, bool merge) {
+    if (addr.isEmpty) return 0;
+    final b = bin!;
+    for (int k = 0; k < addr.length; k++) {
+      b[addr[k]] = after[k];
+    }
+    _push(_Edit(label, addr, before, after, DateTime.now().millisecondsSinceEpoch), merge);
+    _changed();
+    return addr.length;
+  }
+
+  void _push(_Edit e, bool merge) {
+    redoList.clear();
+    if (merge && undoList.isNotEmpty && undoList.last.label == e.label && e.t - undoList.last.t < 800) {
+      final o = undoList.removeLast();
+      final bf = <int, int>{}, af = <int, int>{};
+      for (int k = 0; k < o.addr.length; k++) {
+        bf[o.addr[k]] = o.before[k];
+        af[o.addr[k]] = o.after[k];
+      }
+      for (int k = 0; k < e.addr.length; k++) {
+        bf.putIfAbsent(e.addr[k], () => e.before[k]);
+        af[e.addr[k]] = e.after[k];
+      }
+      final ks = bf.keys.toList();
+      e = _Edit(e.label, ks, [for (final k in ks) bf[k]!], [for (final k in ks) af[k]!], e.t);
+    }
+    undoList.add(e);
+    if (undoList.length > 300) undoList.removeAt(0);
+  }
+
+  String? undo() {
+    if (undoList.isEmpty || bin == null) return null;
+    final e = undoList.removeLast();
+    for (int k = e.addr.length - 1; k >= 0; k--) {
+      bin![e.addr[k]] = e.before[k];
+    }
+    redoList.add(e);
+    _changed();
+    return e.label;
+  }
+
+  String? redo() {
+    if (redoList.isEmpty || bin == null) return null;
+    final e = redoList.removeLast();
+    for (int k = 0; k < e.addr.length; k++) {
+      bin![e.addr[k]] = e.after[k];
+    }
+    undoList.add(e);
+    _changed();
+    return e.label;
+  }
+
+  /// คืนค่าเดิมจากไฟล์ต้นฉบับ (ช่องที่ระบุ หรือทั้งไฟล์ถ้า cells = null)
+  int revert(XdfTable? t, Iterable<(int, int)>? cells, String label) {
+    final b = bin, o = orig;
+    if (b == null || o == null) return 0;
+    final addr = <int>[], before = <int>[], after = <int>[];
+    void one(int p) {
+      if (p >= 0 && p < b.length && b[p] != o[p]) {
+        addr.add(p);
+        before.add(b[p]);
+        after.add(o[p]);
+      }
+    }
+
+    if (t == null || cells == null) {
+      for (int p = 0; p < b.length; p++) {
+        one(p);
+      }
+    } else {
+      for (final rc in cells) {
+        final a = t.z.addrOf(rc.$1, rc.$2);
+        for (int k = 0; k < t.z.bytes; k++) {
+          one(a + k);
+        }
+      }
+    }
+    return _commit(label, addr, before, after, false);
+  }
+
+  bool flagOn(XdfFlag f, {bool original = false}) => (rawAt(original ? orig! : bin!, f.d, f.d.addr) & f.mask) != 0;
+
+  void setFlag(XdfFlag f, bool on) {
+    if (bin == null || !f.valid) return;
+    final cur = rawAt(bin!, f.d, f.d.addr);
+    final nv = on ? (cur | f.mask) : (cur & ~f.mask);
+    final addr = <int>[], before = <int>[], after = <int>[];
+    _rawBytes(f.d, f.d.addr, nv & ((1 << (f.d.bytes * 8)) - 1), addr, before, after);
+    _commit('FLAG ${f.title} ${on ? 'ON' : 'OFF'}', addr, before, after, false);
+  }
+
+  List<String> changedNames() {
+    final d = xdf;
+    if (d == null || bin == null) return const [];
+    return [
+      for (final t in d.tables)
+        if (t.valid && tableChanged(t)) t.title,
+      for (final f in d.flags)
+        if (f.valid && flagOn(f) != flagOn(f, original: true)) 'FLAG ${f.title}',
+    ];
+  }
+
+  /// ตารางรหัสล็อคกล่องที่ถูกแก้ : [(ตาราง, ค่าเดิม, ค่าใหม่)]
+  List<(XdfTable, String, String)> lockChanges() {
+    final d = xdf;
+    if (d == null || bin == null) return const [];
+    final out = <(XdfTable, String, String)>[];
+    for (final t in d.tables) {
+      if (!t.valid || !t.isLock || !tableChanged(t)) continue;
+      String all(bool o) => [
+            for (int r = 0; r < t.rows; r++)
+              for (int c = 0; c < t.cols; c++) _lockStr(t, val(t, r, c, original: o)),
+          ].join(', ');
+      out.add((t, all(true), all(false)));
+    }
+    return out;
+  }
+
+  static String _lockStr(XdfTable t, double v) => '${v.round()} (0x${v.round().toRadixString(16).toUpperCase().padLeft(2, '0')})';
+
+  String newFileName() {
+    final n = binName ?? 'tune.bin';
+    final dot = n.lastIndexOf('.');
+    final stem = dot > 0 ? n.substring(0, dot) : n;
+    final d = DateTime.now();
+    String p2(int v) => v.toString().padLeft(2, '0');
+    return '${stem}_MFB_${d.year}${p2(d.month)}${p2(d.day)}_${p2(d.hour)}${p2(d.minute)}.bin';
+  }
+}
+
+/// หาตำแหน่ง (ทศนิยม) ของค่า v บนแกน a (รองรับแกนเรียงขึ้นหรือลง) ; อยู่นอกช่วง = ปลายที่ใกล้สุด
+double? _axisFrac(List<double> a, double? v) {
+  if (v == null || a.isEmpty) return null;
+  if (a.length == 1) return 0;
+  for (int k = 0; k < a.length - 1; k++) {
+    final x0 = a[k], x1 = a[k + 1];
+    if (x0.isNaN || x1.isNaN) continue;
+    if (v >= math.min(x0, x1) && v <= math.max(x0, x1)) {
+      return x1 == x0 ? k.toDouble() : k + (v - x0) / (x1 - x0);
+    }
+  }
+  return (v - a.first).abs() < (v - a.last).abs() ? 0.0 : (a.length - 1).toDouble();
+}
+
+/// ชนิดแกนสำหรับ LIVE : 1 = รอบเครื่อง, 2 = คันเร่ง (%), 0 = ไม่รู้
+int _axisKind(List<double>? a) {
+  if (a == null) return 0;
+  double mx = double.negativeInfinity;
+  for (final v in a) {
+    if (!v.isNaN && v > mx) mx = v;
+  }
+  if (mx > 400) return 1;
+  if (mx > 1 && mx <= 110) return 2;
+  return 0;
+}
+
+double _bilin(List<List<double>> v, double r, double c) {
+  final nr = v.length, nc = v[0].length;
+  final r0 = r.floor().clamp(0, nr - 1).toInt(), c0 = c.floor().clamp(0, nc - 1).toInt();
+  final r1 = math.min(r0 + 1, nr - 1), c1 = math.min(c0 + 1, nc - 1);
+  final fr = (r - r0).clamp(0.0, 1.0), fc = (c - c0).clamp(0.0, 1.0);
+  final a = v[r0][c0] + (v[r0][c1] - v[r0][c0]) * fc;
+  final b = v[r1][c0] + (v[r1][c1] - v[r1][c0]) * fc;
+  return a + (b - a) * fr;
+}
+
+class _TP {
+  static final Map<String, TextPainter> _m = {};
+  static TextPainter get(String s, double fs, Color col, {bool bold = false, double maxW = double.infinity}) {
+    final k = '$s|$fs|${col.hashCode}|$bold|$maxW';
+    var tp = _m[k];
+    if (tp == null) {
+      if (_m.length > 2500) _m.clear();
+      tp = TextPainter(
+        text: TextSpan(text: s, style: TextStyle(fontSize: fs, color: col, fontWeight: bold ? FontWeight.bold : FontWeight.normal)),
+        textDirection: TextDirection.ltr,
+        maxLines: 1,
+        ellipsis: '…',
+      )..layout(maxWidth: maxW);
+      _m[k] = tp;
+    }
+    return tp;
+  }
+
+  static void center(Canvas cv, TextPainter tp, Offset c) => tp.paint(cv, c - Offset(tp.width / 2, tp.height / 2));
+}
+
+// ---------- หน้า TUNE ----------
+class TunePage extends StatefulWidget {
+  final GaugeController c;
+  const TunePage({super.key, required this.c});
+  @override
+  State<TunePage> createState() => _TunePageState();
+}
+
+class _TunePageState extends State<TunePage> {
+  final s = TuneSession.i;
+  GaugeController get c => widget.c;
+
+  // ตาราง 2D
+  double cw = 54, ch = 24, sx = 0, sy = 0;
+  static const double hh = 24;
+  double hw = 58;
+  Size view = Size.zero;
+  (int, int)? a0, a1; // จุดเริ่ม/จุดปลายของการเลือก
+  int _shownSel = -2;
+  int _gMode = 0; // 0 ไม่มี, 1 เลือกช่อง, 2 เลื่อน/ซูม 2 นิ้ว, 3 เลื่อนแนวนอน (หัวคอลัมน์), 4 เลื่อนแนวตั้ง (หัวแถว), 5 มุมซ้ายบน
+  Offset _gStart = Offset.zero, _gLast = Offset.zero;
+  bool _gMoved = false;
+  double _cw0 = 54, _ch0 = 24;
+  int _gDown = -1, _lastTouch = 0, _lastTapMs = 0;
+  (int, int)? _lastTapCell;
+
+  // มุมมอง
+  bool view3d = false, live = true;
+  int stepMul = 1;
+  double yaw = -0.7, pitch = 0.95, zoom = 1, _zoom0 = 1;
+  bool _asking = false;
+
+  void _rebuild() {
+    if (mounted) setState(() {});
+  }
+
+  void _onLive() {
+    if (live && mounted) setState(() {});
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    s.addListener(_rebuild);
+    Cfg.i.addListener(_rebuild);
+    c.addListener(_onLive);
+  }
+
+  @override
+  void dispose() {
+    s.removeListener(_rebuild);
+    Cfg.i.removeListener(_rebuild);
+    c.removeListener(_onLive);
+    super.dispose();
+  }
+
+  int get _now => DateTime.now().millisecondsSinceEpoch;
+
+  void _snack(String m) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(duration: const Duration(seconds: 2), content: Text(m)));
+  }
+
+  // ----- การเลือก -----
+  (int, int, int, int)? get _sel {
+    final p = a0, q = a1;
+    if (p == null || q == null) return null;
+    return (math.min(p.$1, q.$1), math.min(p.$2, q.$2), math.max(p.$1, q.$1), math.max(p.$2, q.$2));
+  }
+
+  List<(int, int)> get _cells {
+    final g = _sel;
+    if (g == null) return const [];
+    return [
+      for (int r = g.$1; r <= g.$3; r++)
+        for (int cc = g.$2; cc <= g.$4; cc++) (r, cc),
+    ];
+  }
+
+  // ----- LIVE: ตำแหน่ง RPM/TPS สดบนตาราง -----
+  bool get _liveData => c.demo || c.ecuLive;
+
+  (double?, double?) _livePos(XdfTable t) {
+    if (!live || !_liveData) return (null, null);
+    final rpm = c.t.rpm, tps = c.t.tps;
+    double? onAxis(List<double>? a) {
+      final k = _axisKind(a);
+      if (k == 1) return _axisFrac(a!, rpm);
+      if (k == 2) return _axisFrac(a!, tps);
+      return null;
+    }
+
+    double? rf = t.rows == 1 ? 0.0 : onAxis(s.axisNums(t, false));
+    double? cf = t.cols == 1 ? 0.0 : onAxis(s.axisNums(t, true));
+    if (!t.is2D && (t.rows == 1 ? cf == null : rf == null)) {
+      // ตาราง 1 มิติที่เป็นแกนรอบ/คันเร่งเอง: ชี้ค่าที่ใกล้กับค่าสด
+      final own = [for (final row in s.values(t)) ...row];
+      final f = onAxis(own);
+      if (f != null) {
+        if (t.rows == 1) {
+          cf = f;
+        } else {
+          rf = f;
+        }
+      }
+    }
+    if (rf == null || cf == null) return (null, null);
+    return (rf, cf);
+  }
+
+  // ----- เลื่อน/ขนาดตาราง -----
+  void _clampScroll(XdfTable t) {
+    final mx = math.max(0.0, t.cols * cw - (view.width - hw));
+    final my = math.max(0.0, t.rows * ch - (view.height - hh));
+    sx = sx.clamp(0.0, mx).toDouble();
+    sy = sy.clamp(0.0, my).toDouble();
+  }
+
+  void _ensureVisible(XdfTable t, double rf, double cf) {
+    final x = cf * cw, y = rf * ch;
+    final w = view.width - hw, h = view.height - hh;
+    if (w <= 0 || h <= 0) return;
+    if (x < sx + cw) sx = x - cw;
+    if (x > sx + w - 2 * cw) sx = x - w + 2 * cw;
+    if (y < sy + ch) sy = y - ch;
+    if (y > sy + h - 2 * ch) sy = y - h + 2 * ch;
+    _clampScroll(t);
+  }
+
+  (int, int)? _cellAt(XdfTable t, Offset p, {bool clamp = false}) {
+    var cc = ((p.dx - hw + sx) / cw).floor();
+    var r = ((p.dy - hh + sy) / ch).floor();
+    if (clamp) {
+      cc = cc.clamp(0, t.cols - 1).toInt();
+      r = r.clamp(0, t.rows - 1).toInt();
+    } else if (cc < 0 || r < 0 || cc >= t.cols || r >= t.rows) {
+      return null;
+    }
+    return (r, cc);
+  }
+
+  void _gStartH(XdfTable t, ScaleStartDetails d) {
+    _lastTouch = _now;
+    final p = d.localFocalPoint;
+    _gStart = p;
+    _gLast = p;
+    _gMoved = false;
+    _cw0 = cw;
+    _ch0 = ch;
+    if (d.pointerCount >= 2) {
+      _gMode = 2;
+      return;
+    }
+    if (p.dy < hh && p.dx < hw) {
+      _gMode = 5;
+    } else if (p.dy < hh) {
+      _gMode = 3;
+      _gDown = ((p.dx - hw + sx) / cw).floor();
+    } else if (p.dx < hw) {
+      _gMode = 4;
+      _gDown = ((p.dy - hh + sy) / ch).floor();
+    } else {
+      final rc = _cellAt(t, p);
+      if (rc == null) {
+        _gMode = 0;
+        return;
+      }
+      _gMode = 1;
+      setState(() {
+        a0 = rc;
+        a1 = rc;
+      });
+    }
+  }
+
+  void _gUpdateH(XdfTable t, ScaleUpdateDetails d) {
+    _lastTouch = _now;
+    final p = d.localFocalPoint;
+    final dl = p - _gLast;
+    _gLast = p;
+    if ((p - _gStart).distance > 8) _gMoved = true;
+    setState(() {
+      switch (_gMode) {
+        case 1:
+          // ลากเลือกหลายช่อง + เลื่อนอัตโนมัติเมื่อลากชิดขอบ
+          if (p.dx > view.width - 18) sx += 12;
+          if (p.dx < hw + 8) sx -= 12;
+          if (p.dy > view.height - 14) sy += 10;
+          if (p.dy < hh + 6) sy -= 10;
+          _clampScroll(t);
+          a1 = _cellAt(t, p, clamp: true);
+          break;
+        case 2:
+          if (d.pointerCount >= 2) {
+            cw = (_cw0 * d.scale).clamp(34.0, 110.0).toDouble();
+            ch = (_ch0 * d.scale).clamp(16.0, 48.0).toDouble();
+          }
+          sx -= dl.dx;
+          sy -= dl.dy;
+          _clampScroll(t);
+          break;
+        case 3:
+          sx -= dl.dx;
+          _clampScroll(t);
+          break;
+        case 4:
+          sy -= dl.dy;
+          _clampScroll(t);
+          break;
+      }
+    });
+  }
+
+  void _gEndH(XdfTable t) {
+    if (!_gMoved) {
+      switch (_gMode) {
+        case 3: // แตะหัวคอลัมน์ = เลือกทั้งคอลัมน์
+          if (_gDown >= 0 && _gDown < t.cols) {
+            setState(() {
+              a0 = (0, _gDown);
+              a1 = (t.rows - 1, _gDown);
+            });
+          }
+          break;
+        case 4: // แตะหัวแถว = เลือกทั้งแถว
+          if (_gDown >= 0 && _gDown < t.rows) {
+            setState(() {
+              a0 = (_gDown, 0);
+              a1 = (_gDown, t.cols - 1);
+            });
+          }
+          break;
+        case 5: // มุมซ้ายบน = เลือกทั้งตาราง
+          setState(() {
+            a0 = (0, 0);
+            a1 = (t.rows - 1, t.cols - 1);
+          });
+          break;
+        case 1: // แตะ 2 ครั้งที่ช่องเดิม = ใส่ค่า
+          final rc = a0;
+          final now = _now;
+          if (rc != null && rc == _lastTapCell && now - _lastTapMs < 380) {
+            _lastTapMs = 0;
+            _setVal();
+          } else {
+            _lastTapCell = rc;
+            _lastTapMs = now;
+          }
+          break;
+      }
+    }
+    _gMode = 0;
+  }
+
+  // ----- ปุ่มแก้ค่า -----
+  Future<bool> _canEdit(XdfTable t) async {
+    if (!t.isLock || s.lockOk) return true;
+    if (_asking) return false;
+    _asking = true;
+    final orig = s.val(t, 0, 0, original: true);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dctx) => AlertDialog(
+        backgroundColor: const Color(0xFF14141A),
+        title: const Row(children: [
+          Icon(Icons.lock, color: kBad),
+          SizedBox(width: 8),
+          Text('รหัสล็อคกล่อง', style: TextStyle(fontSize: 16)),
+        ]),
+        content: Text(
+            'ค่านี้คือรหัสล็อคกล่อง (ค่าในไฟล์เดิม = ${orig.round()} / 0x${orig.round().toRadixString(16).toUpperCase().padLeft(2, '0')})\n\n'
+            'ถ้าเปลี่ยนแล้วจำรหัสใหม่ไม่ได้ อาจอ่านหรือแฟลชกล่องไม่ได้อีก\nต้องการปลดล็อกให้แก้ค่านี้หรือไม่?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(dctx).pop(false), child: const Text('ยกเลิก')),
+          TextButton(onPressed: () => Navigator.of(dctx).pop(true), child: const Text('ปลดล็อกแก้ไข', style: TextStyle(color: kBad))),
+        ],
+      ),
+    );
+    _asking = false;
+    if (ok == true) {
+      s.lockOk = true;
+      return true;
+    }
+    return false;
+  }
+
+  bool _needSel() {
+    if (s.table == null) return false;
+    if (_sel == null) {
+      _snack('เลือกช่องในตารางก่อน');
+      return false;
+    }
+    return true;
+  }
+
+  double _step(XdfTable t) => t.eq.lsb * stepMul;
+
+  Future<void> _bump(int dir) async {
+    final t = s.table;
+    if (t == null || !_needSel() || !await _canEdit(t)) return;
+    final st = _step(t);
+    s.write(t, {for (final rc in _cells) rc: s.val(t, rc.$1, rc.$2) + dir * st}, dir > 0 ? '+' : '−', merge: true);
+  }
+
+  Future<double?> _askNum(String title, String hint, {String initial = ''}) async {
+    final tc = TextEditingController(text: initial);
+    final th = Cfg.i.t;
+    double? parse(String x) {
+      final v = x.trim().replaceAll(',', '.');
+      if (v.toLowerCase().startsWith('0x')) {
+        final h = int.tryParse(v.substring(2), radix: 16);
+        return h?.toDouble();
+      }
+      return double.tryParse(v);
+    }
+
+    final r = await showDialog<double>(
+      context: context,
+      builder: (dctx) => AlertDialog(
+        backgroundColor: const Color(0xFF14141A),
+        title: Text(title, style: TextStyle(fontFamily: kFont, fontSize: 13, color: th.c)),
+        content: TextField(
+          controller: tc,
+          autofocus: true,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+          decoration: InputDecoration(hintText: hint, hintStyle: const TextStyle(fontSize: 12, color: Colors.white38)),
+          onSubmitted: (x) => Navigator.of(dctx).pop(parse(x)),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(dctx).pop(), child: const Text('ยกเลิก')),
+          TextButton(onPressed: () => Navigator.of(dctx).pop(parse(tc.text)), child: Text('ตกลง', style: TextStyle(color: th.c))),
+        ],
+      ),
+    );
+    tc.dispose();
+    return r;
+  }
+
+  Future<void> _pct() async {
+    final t = s.table;
+    if (t == null || !_needSel() || !await _canEdit(t)) return;
+    final p = await _askNum('เปลี่ยนเป็น %', 'เช่น 5 = เพิ่ม 5% , -3 = ลด 3%');
+    if (p == null) return;
+    final n = s.write(t, {for (final rc in _cells) rc: s.val(t, rc.$1, rc.$2) * (1 + p / 100)}, '% ${_numStr(p)}');
+    if (n == 0) _snack('ค่าไม่เปลี่ยน (น้อยกว่า 1 ขั้นของข้อมูล)');
+  }
+
+  Future<void> _setVal() async {
+    final t = s.table;
+    if (t == null || !_needSel() || !await _canEdit(t)) return;
+    final cells = _cells;
+    final avg = cells.map((rc) => s.val(t, rc.$1, rc.$2)).reduce((a, b) => a + b) / cells.length;
+    final v = await _askNum('ใส่ค่า (${cells.length} ช่อง)', t.outType == 3 ? 'เช่น 65 หรือ 0x41' : 'ค่าใหม่', initial: t.fmt(avg));
+    if (v == null) return;
+    s.write(t, {for (final rc in cells) rc: v}, '= ${_numStr(v)}');
+  }
+
+  void _undo() {
+    final l = s.undo();
+    _snack(l == null ? 'ไม่มีให้ย้อน' : 'ย้อน: $l');
+  }
+
+  void _redo() {
+    final l = s.redo();
+    _snack(l == null ? 'ไม่มีให้ทำซ้ำ' : 'ทำซ้ำ: $l');
+  }
+
+  // ----- ไฟล์ -----
+  Future<bool> _confirm(String title, String msg, {String ok = 'ตกลง'}) async {
+    final r = await showDialog<bool>(
+      context: context,
+      builder: (dctx) => AlertDialog(
+        backgroundColor: const Color(0xFF14141A),
+        title: Text(title, style: const TextStyle(fontSize: 16)),
+        content: Text(msg),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(dctx).pop(false), child: const Text('ยกเลิก')),
+          TextButton(onPressed: () => Navigator.of(dctx).pop(true), child: Text(ok, style: const TextStyle(color: kAmber))),
+        ],
+      ),
+    );
+    return r == true;
+  }
+
+  Future<(String, Uint8List)?> _pick() async {
+    final r = await FilePicker.platform.pickFiles(type: FileType.any, withData: true);
+    if (r == null || r.files.isEmpty) return null;
+    final f = r.files.single;
+    final b = f.bytes;
+    if (b == null || b.isEmpty) {
+      _snack('อ่านไฟล์ไม่ได้');
+      return null;
+    }
+    return (f.name, b);
+  }
+
+  void _resetView() {
+    a0 = null;
+    a1 = null;
+    sx = 0;
+    sy = 0;
+  }
+
+  Future<void> _openBin() async {
+    if (s.changedBytes > 0 && !await _confirm('เปิด BIN ใหม่', 'การแก้ไขที่ยังไม่ได้ SAVE จะหายไป', ok: 'เปิดไฟล์ใหม่')) return;
+    try {
+      final f = await _pick();
+      if (f == null) return;
+      if (f.$1.toLowerCase().endsWith('.xdf')) {
+        _snack('นี่คือไฟล์ XDF — ใช้เมนู "เปิดไฟล์ XDF"');
+        return;
+      }
+      s.loadBin(f.$1, f.$2);
+      setState(_resetView);
+      final bad = s.invalidCount;
+      if (bad > 0) _snack('มี $bad รายการใน XDF ที่อยู่นอกขนาดไฟล์ BIN (${f.$2.length} ไบต์) — ตรวจว่าเป็นไฟล์คู่กัน');
+    } catch (e) {
+      _snack('เปิดไฟล์ไม่สำเร็จ: $e');
+    }
+  }
+
+  Future<void> _openXdf() async {
+    if (s.changedBytes > 0 && !await _confirm('เปิด XDF ใหม่', 'ประวัติย้อนกลับจะถูกล้าง (ค่าที่แก้ใน BIN ยังอยู่)', ok: 'เปิดไฟล์ใหม่')) return;
+    try {
+      final f = await _pick();
+      if (f == null) return;
+      final d = XdfDef.parse(f.$2);
+      s.loadXdf(f.$1, d);
+      setState(_resetView);
+      final n2 = d.tables.where((t) => t.is2D).length;
+      _snack('XDF: ${d.tables.length} ตาราง (2D $n2) + ${d.flags.length} FLAGS');
+    } on XdfError catch (e) {
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (dctx) => AlertDialog(
+          backgroundColor: const Color(0xFF14141A),
+          title: const Text('เปิด XDF ไม่ได้', style: TextStyle(fontSize: 16)),
+          content: Text(e.msg),
+          actions: [TextButton(onPressed: () => Navigator.of(dctx).pop(), child: const Text('ตกลง'))],
+        ),
+      );
+    } catch (e) {
+      _snack('เปิดไฟล์ไม่สำเร็จ: $e');
+    }
+  }
+
+  // ----- SAVE เป็นไฟล์ BIN ใหม่ -----
+  Future<void> _save() async {
+    if (!s.ready) {
+      _snack('ยังไม่ได้เปิดไฟล์ BIN + XDF');
+      return;
+    }
+    final th = Cfg.i.t;
+    final names = s.changedNames();
+    final locks = s.lockChanges();
+    final name = s.newFileName();
+    bool ack = false;
+    Widget box(Color col, String head, String body) => Container(
+          width: double.infinity,
+          margin: const EdgeInsets.only(top: 10),
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: col.withOpacity(0.12),
+            border: Border.all(color: col, width: 1.2),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(head, style: TextStyle(fontWeight: FontWeight.bold, color: col, fontSize: 13)),
+            const SizedBox(height: 4),
+            Text(body, style: const TextStyle(fontSize: 12.5, height: 1.35)),
+          ]),
+        );
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (dctx) => StatefulBuilder(
+        builder: (dctx, setD) => AlertDialog(
+          backgroundColor: const Color(0xFF14141A),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: th.c, width: 1.2)),
+          title: Text('SAVE เป็น BIN ใหม่', style: TextStyle(fontFamily: kFont, fontSize: 13, color: th.c)),
+          content: SizedBox(
+            width: 560,
+            child: SingleChildScrollView(
+              child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text('ต้นฉบับ: ${s.binName} (ไม่ถูกเขียนทับ)', style: const TextStyle(fontSize: 12.5, color: Colors.white70)),
+                Text('ไฟล์ใหม่: $name', style: const TextStyle(fontSize: 12.5)),
+                const SizedBox(height: 6),
+                Text(
+                    names.isEmpty
+                        ? 'ยังไม่มีการแก้ไข (ไฟล์ใหม่จะเหมือนต้นฉบับ)'
+                        : 'แก้ไข ${s.changedBytes} ไบต์ ใน ${names.length} รายการ: ${names.take(8).join(', ')}${names.length > 8 ? ' …' : ''}',
+                    style: const TextStyle(fontSize: 12.5)),
+                box(kAmber, '⚠ CHECKSUM',
+                    'แอพยังไม่รู้วิธีคำนวณ checksum ของกล่องรุ่นนี้ ไฟล์ที่บันทึกจะไม่ได้แก้ checksum ให้\n'
+                        'แฟลชด้วยโปรแกรมเดิมที่คำนวณ checksum ให้อัตโนมัติ หรือเปิดไฟล์ตรวจในโปรแกรมนั้นก่อนแฟลช — '
+                        'ถ้า checksum ผิด กล่องอาจไม่รับไฟล์หรือรถสตาร์ทไม่ติด'),
+                if (locks.isEmpty)
+                  box(Colors.white38, 'รหัสล็อคกล่อง', 'ไม่ได้เปลี่ยน')
+                else
+                  box(kBad, '⚠ รหัสล็อคกล่องถูกเปลี่ยน',
+                      '${locks.map((l) => '${l.$1.title}: ${l.$2} → ${l.$3}').join('\n')}\nจดรหัสใหม่ไว้ ถ้าจำไม่ได้อาจอ่าน/แฟลชกล่องไม่ได้อีก'),
+                const SizedBox(height: 8),
+                InkWell(
+                  onTap: () => setD(() => ack = !ack),
+                  child: Row(children: [
+                    Checkbox(value: ack, activeColor: th.c, onChanged: (v) => setD(() => ack = v ?? false)),
+                    const Expanded(child: Text('เข้าใจแล้ว จะตรวจ checksum ก่อนแฟลช', style: TextStyle(fontSize: 13))),
+                  ]),
+                ),
+              ]),
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(dctx).pop(false), child: const Text('ยกเลิก')),
+            TextButton(
+              onPressed: ack ? () => Navigator.of(dctx).pop(true) : null,
+              child: Text('บันทึก', style: TextStyle(color: ack ? th.c : Colors.white30, fontWeight: FontWeight.bold)),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (ok != true) return;
+    try {
+      final path = await FilePicker.platform.saveFile(
+        dialogTitle: 'บันทึก BIN ใหม่',
+        fileName: name,
+        type: FileType.any,
+        bytes: Uint8List.fromList(s.bin!),
+      );
+      if (path == null) {
+        _snack('ยกเลิกการบันทึก');
+        return;
+      }
+      _snack('บันทึกแล้ว: $path');
+    } catch (e) {
+      _snack('บันทึกไม่สำเร็จ: $e');
+    }
+  }
+
+  // ======================= UI =======================
+  @override
+  Widget build(BuildContext context) {
+    final th = Cfg.i.t;
+    if (_shownSel != s.sel) {
+      _shownSel = s.sel;
+      _resetView();
+    }
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Stack(fit: StackFit.expand, children: [
+        Image.asset('assets/bg.jpg', fit: BoxFit.cover),
+        Container(color: Colors.black.withOpacity(0.84)),
+        SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(8, 4, 8, 4),
+            child: Column(children: [
+              _topBar(th),
+              const SizedBox(height: 4),
+              if (s.ready && s.table != null) ...[_infoBar(th, s.table!), const SizedBox(height: 4)],
+              Expanded(child: _body(th)),
+            ]),
+          ),
+        ),
+      ]),
+    );
+  }
+
+  Widget _tb(AppTheme th, Widget child, VoidCallback? onTap, {bool active = false, Color? col}) {
+    final cc = col ?? th.c;
+    return Padding(
+      padding: const EdgeInsets.only(right: 5),
+      child: Opacity(
+        opacity: onTap == null ? 0.4 : 1,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(6),
+          child: Container(
+            height: 34,
+            padding: const EdgeInsets.symmetric(horizontal: 9),
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: active ? cc.withOpacity(0.3) : Colors.black45,
+              border: Border.all(color: cc, width: 1.3),
+              borderRadius: BorderRadius.circular(6),
+              boxShadow: active ? [BoxShadow(color: cc.withOpacity(0.4), blurRadius: 8)] : null,
+            ),
+            child: DefaultTextStyle.merge(style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold), child: child),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _sep() => Container(width: 1, height: 22, margin: const EdgeInsets.only(right: 5), color: Colors.white24);
+
+  Widget _topBar(AppTheme th) {
+    final t = s.table;
+    final can = s.ready && t != null && t.valid;
+    final is2D = t?.is2D ?? true;
+    return SizedBox(
+      height: 34,
+      child: Row(children: [
+        InkWell(
+          onTap: () => Navigator.of(context).pop(),
+          child: Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: Row(children: [
+              Icon(Icons.chevron_left, color: th.c, size: 26),
+              Text('TUNE', style: TextStyle(fontFamily: kFont, fontSize: 14, color: th.c, shadows: [Shadow(color: th.c, blurRadius: 8)])),
+            ]),
+          ),
+        ),
+        Expanded(
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(children: [
+              _fileMenu(th),
+              _tb(th, const Text('ตาราง ▾'), s.ready ? () => _tableMenu(th) : null),
+              _sep(),
+              Opacity(opacity: can ? 1 : 0.4, child: StepBtn(label: '−', onStep: () => can ? _bump(-1) : null, th: th)),
+              const SizedBox(width: 5),
+              Opacity(opacity: can ? 1 : 0.4, child: StepBtn(label: '+', onStep: () => can ? _bump(1) : null, th: th)),
+              const SizedBox(width: 5),
+              _tb(th, const Text('%', style: TextStyle(fontSize: 15)), can ? _pct : null),
+              _tb(th, const Text('=', style: TextStyle(fontSize: 15)), can ? _setVal : null),
+              _sep(),
+              _tb(th, Icon(Icons.undo, size: 18, color: th.c), s.undoList.isNotEmpty ? _undo : null),
+              _tb(th, Icon(Icons.redo, size: 18, color: th.c), s.redoList.isNotEmpty ? _redo : null),
+              _sep(),
+              _tb(th, Text(view3d ? '2D' : (is2D ? '3D' : 'GRAPH')), can ? () => setState(() => view3d = !view3d) : null, active: view3d),
+              _tb(
+                th,
+                Row(mainAxisSize: MainAxisSize.min, children: [
+                  Container(
+                    width: 7, height: 7,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: live && _liveData ? kGreen : (live ? kAmber : Colors.white30),
+                    ),
+                  ),
+                  const SizedBox(width: 5),
+                  const Text('LIVE'),
+                ]),
+                () => setState(() {
+                  live = !live;
+                  _lastTouch = 0; // เปิด LIVE แล้วเลื่อนไปหาช่องสดทันที
+                }),
+                active: live,
+              ),
+            ]),
+          ),
+        ),
+        _tb(th, const Text('SAVE'), s.ready ? _save : null, active: s.changedBytes > 0),
+      ]),
+    );
+  }
+
+  Widget _fileMenu(AppTheme th) {
+    final t = s.table;
+    final g = _sel;
+    final cellsChanged = t != null && g != null && s.bin != null && _cells.any((rc) => s.cellChanged(t, rc.$1, rc.$2));
+    return Padding(
+      padding: const EdgeInsets.only(right: 5),
+      child: PopupMenuButton<int>(
+        color: const Color(0xFF16161D),
+        tooltip: 'ไฟล์',
+        onSelected: (v) {
+          switch (v) {
+            case 1:
+              _openBin();
+              break;
+            case 2:
+              _openXdf();
+              break;
+            case 3:
+              if (t != null) {
+                final n = s.revert(t, _cells, 'คืนค่าเดิม ${_cells.length} ช่อง');
+                _snack(n == 0 ? 'ช่องที่เลือกเป็นค่าเดิมอยู่แล้ว' : 'คืนค่าเดิมแล้ว');
+              }
+              break;
+            case 4:
+              _confirm('คืนค่าเดิมทั้งไฟล์', 'ยกเลิกการแก้ไขทั้งหมด (${s.changedBytes} ไบต์) — ย้อนกลับได้ด้วยปุ่ม ↶', ok: 'คืนค่าเดิม').then((ok) {
+                if (ok) s.revert(null, null, 'คืนค่าเดิมทั้งไฟล์');
+              });
+              break;
+          }
+        },
+        itemBuilder: (_) => [
+          PopupMenuItem(value: 1, child: _menuRow(Icons.memory, 'เปิดไฟล์ BIN…', s.binName ?? 'ยังไม่ได้เปิด', th)),
+          PopupMenuItem(value: 2, child: _menuRow(Icons.description, 'เปิดไฟล์ XDF…', s.xdfName ?? 'ยังไม่ได้เปิด', th)),
+          const PopupMenuDivider(),
+          PopupMenuItem(enabled: cellsChanged, value: 3, child: _menuRow(Icons.restore, 'คืนค่าเดิมช่องที่เลือก', '', th)),
+          PopupMenuItem(enabled: s.changedBytes > 0, value: 4, child: _menuRow(Icons.settings_backup_restore, 'คืนค่าเดิมทั้งไฟล์', '${s.changedBytes} ไบต์ที่แก้', th)),
+        ],
+        child: Container(
+          height: 34,
+          padding: const EdgeInsets.symmetric(horizontal: 9),
+          alignment: Alignment.center,
+          decoration: BoxDecoration(color: Colors.black45, border: Border.all(color: th.c, width: 1.3), borderRadius: BorderRadius.circular(6)),
+          child: const Text('ไฟล์ ▾', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+        ),
+      ),
+    );
+  }
+
+  Widget _menuRow(IconData ic, String a, String b, AppTheme th) => Row(children: [
+        Icon(ic, size: 18, color: th.c),
+        const SizedBox(width: 10),
+        Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+          Text(a, style: const TextStyle(fontSize: 13)),
+          if (b.isNotEmpty) Text(b, style: const TextStyle(fontSize: 10.5, color: Colors.white54)),
+        ]),
+      ]);
+
+  Widget _infoBar(AppTheme th, XdfTable t) {
+    final cells = _cells;
+    String selTxt = 'แตะ/ลากเพื่อเลือกช่อง';
+    if (cells.isNotEmpty && t.valid && s.bin != null) {
+      final vs = cells.map((rc) => s.val(t, rc.$1, rc.$2)).toList();
+      final avg = vs.reduce((a, b) => a + b) / vs.length;
+      selTxt = cells.length == 1
+          ? 'ค่า ${t.fmt(avg)}${t.outType == 3 ? ' (${avg.round()})' : ''}'
+          : 'เลือก ${cells.length} ช่อง · เฉลี่ย ${avg.toStringAsFixed(math.min(6, t.dec + 1))} · ${t.fmt(vs.reduce(math.min))}…${t.fmt(vs.reduce(math.max))}';
+    }
+    final rpm = c.t.rpm, tps = c.t.tps;
+    final liveTxt = !live ? 'LIVE ปิด' : (_liveData ? 'RPM ${rpm?.round() ?? '--'} · TPS ${tps?.toStringAsFixed(1) ?? '--'}' : 'LIVE: ไม่มีข้อมูล ECU');
+    const small = TextStyle(fontSize: 11.5, color: Colors.white70);
+    return Container(
+      height: 26,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      decoration: BoxDecoration(color: const Color(0xCC0B0B10), borderRadius: BorderRadius.circular(6), border: Border.all(color: th.c.withOpacity(0.4))),
+      child: Row(children: [
+        if (t.isLock) Padding(padding: const EdgeInsets.only(right: 4), child: Icon(s.lockOk ? Icons.lock_open : Icons.lock, size: 14, color: kBad)),
+        Flexible(
+          child: Text('${t.title}  ${t.rows}×${t.cols}  @0x${t.z.addr.toRadixString(16).toUpperCase().padLeft(4, '0')}  ${t.eq.src}',
+              maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12, color: th.c2, fontWeight: FontWeight.bold)),
+        ),
+        const SizedBox(width: 10),
+        Text(selTxt, style: small),
+        const SizedBox(width: 10),
+        InkWell(
+          onTap: () => setState(() => stepMul = const {1: 5, 5: 10, 10: 50}[stepMul] ?? 1),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            decoration: BoxDecoration(border: Border.all(color: Colors.white24), borderRadius: BorderRadius.circular(4)),
+            child: Text('STEP ${_numStr(_step(t))} ×$stepMul', style: small),
+          ),
+        ),
+        const SizedBox(width: 10),
+        Text(liveTxt, style: TextStyle(fontSize: 11.5, color: live && _liveData ? kGreen : Colors.white38)),
+      ]),
+    );
+  }
+
+  Widget _body(AppTheme th) {
+    if (!s.ready) return _empty(th);
+    final t = s.table;
+    if (t == null) return const Center(child: Text('ไม่มีตารางใน XDF', style: TextStyle(color: Colors.white54)));
+    if (!t.valid) {
+      return Center(
+        child: Text('ตารางนี้อยู่นอกขนาดไฟล์ BIN (@0x${t.z.addr.toRadixString(16)})\nตรวจว่า BIN กับ XDF เป็นไฟล์คู่กัน',
+            textAlign: TextAlign.center, style: const TextStyle(color: kAmber)),
+      );
+    }
+    final v = s.values(t);
+    double lo = double.infinity, hi = double.negativeInfinity;
+    for (final row in v) {
+      for (final x in row) {
+        if (x.isNaN) continue;
+        if (x < lo) lo = x;
+        if (x > hi) hi = x;
+      }
+    }
+    if (!lo.isFinite) {
+      lo = 0;
+      hi = 1;
+    }
+    final lp = _livePos(t);
+    final frame = BoxDecoration(
+      color: const Color(0xCC060606),
+      borderRadius: BorderRadius.circular(10),
+      border: Border.all(color: th.c.withOpacity(0.85), width: 1.1),
+      boxShadow: [BoxShadow(color: th.c.withOpacity(0.3), blurRadius: 10)],
+    );
+    if (view3d) {
+      final rowL = s.axisLabels(t, false), colL = s.axisLabels(t, true);
+      return Container(
+        decoration: frame,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(9),
+          child: t.is2D
+              ? GestureDetector(
+                  onScaleStart: (_) => _zoom0 = zoom,
+                  onScaleUpdate: (d) => setState(() {
+                    if (d.pointerCount <= 1) {
+                      yaw -= d.focalPointDelta.dx * 0.01;
+                      pitch = (pitch + d.focalPointDelta.dy * 0.008).clamp(0.15, 1.5).toDouble();
+                    } else {
+                      zoom = (_zoom0 * d.scale).clamp(0.5, 3.0).toDouble();
+                    }
+                  }),
+                  onDoubleTap: () => setState(() {
+                    yaw = -0.7;
+                    pitch = 0.95;
+                    zoom = 1;
+                  }),
+                  child: CustomPaint(
+                    size: Size.infinite,
+                    painter: _SurfacePainter(v: v, lo: lo, hi: hi, yaw: yaw, pitch: pitch, zoom: zoom, lr: lp.$1, lc: lp.$2, th: th, rowL: rowL, colL: colL, t: t),
+                  ),
+                )
+              : CustomPaint(
+                  size: Size.infinite,
+                  painter: _BarsPainter(
+                    v: [for (final row in v) ...row],
+                    labels: t.rows == 1 ? colL : rowL,
+                    lo: lo, hi: hi,
+                    lf: t.rows == 1 ? lp.$2 : lp.$1,
+                    th: th, t: t,
+                  ),
+                ),
+        ),
+      );
+    }
+
+    final rowL = s.axisLabels(t, false), colL = s.axisLabels(t, true);
+    final maxLab = rowL.fold<int>(1, (m, x) => math.max(m, x.length));
+    hw = (14 + maxLab * 6.8).clamp(46.0, 130.0).toDouble();
+    return Container(
+      decoration: frame,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(9),
+        child: LayoutBuilder(builder: (_, cs) {
+          view = Size(cs.maxWidth, cs.maxHeight);
+          _clampScroll(t);
+          if (lp.$1 != null && lp.$2 != null && _now - _lastTouch > 3000) _ensureVisible(t, lp.$1!, lp.$2!);
+          return Stack(children: [
+            GestureDetector(
+              onScaleStart: (d) => _gStartH(t, d),
+              onScaleUpdate: (d) => _gUpdateH(t, d),
+              onScaleEnd: (_) => _gEndH(t),
+              child: CustomPaint(
+                size: Size.infinite,
+                painter: _GridPainter(
+                  s: s, t: t, v: v, lo: lo, hi: hi, rowL: rowL, colL: colL,
+                  sx: sx, sy: sy, cw: cw, ch: ch, hw: hw, hh: hh,
+                  sel: _sel, lr: lp.$1, lc: lp.$2, th: th, rev: s.rev,
+                ),
+              ),
+            ),
+            const Positioned(
+              right: 8, bottom: 4,
+              child: IgnorePointer(
+                child: Text('1 นิ้ว: เลือก · 2 นิ้ว: เลื่อน/ซูม · ลากหัวตาราง: เลื่อน · แตะหัว: ทั้งแถว/คอลัมน์ · แตะ 2 ครั้ง: ใส่ค่า',
+                    style: TextStyle(fontSize: 9.5, color: Colors.white30)),
+              ),
+            ),
+          ]);
+        }),
+      ),
+    );
+  }
+
+  Widget _empty(AppTheme th) {
+    Widget row(String what, String? name, VoidCallback f) => Padding(
+          padding: const EdgeInsets.symmetric(vertical: 5),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(name == null ? Icons.radio_button_unchecked : Icons.check_circle, color: name == null ? Colors.white38 : kGreen, size: 20),
+            const SizedBox(width: 8),
+            SizedBox(width: 230, child: Text('$what: ${name ?? 'ยังไม่ได้เปิด'}', overflow: TextOverflow.ellipsis)),
+            _tb(th, Text('เปิด $what'), f),
+          ]),
+        );
+    return Center(
+      child: SingleChildScrollView(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Icon(Icons.grid_on, color: th.c, size: 40),
+          const SizedBox(height: 8),
+          const Text('เปิดไฟล์ BIN และ XDF เพื่อเริ่มจูน', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 10),
+          row('BIN', s.binName, _openBin),
+          row('XDF', s.xdfName, _openXdf),
+          const SizedBox(height: 10),
+          const Text('แอพแก้ค่าในไฟล์ BIN เท่านั้น ไม่ได้เขียนลงกล่อง ECU\nSAVE เป็นไฟล์ใหม่ (ไม่ทับต้นฉบับ) แล้วแฟลชด้วยเครื่องมือเดิม',
+              textAlign: TextAlign.center, style: TextStyle(fontSize: 12, color: Colors.white54)),
+        ]),
+      ),
+    );
+  }
+
+  // ----- เมนูเลือกตาราง: ซ้าย = ตาราง 2D + ภาพย่อ, ขวา = ค่า/แกน 1 มิติ + FLAGS -----
+  Future<void> _tableMenu(AppTheme th) {
+    final d = s.xdf!;
+    return showGeneralDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'ตาราง',
+      barrierColor: Colors.black54,
+      transitionDuration: const Duration(milliseconds: 160),
+      transitionBuilder: (_, a, __, child) => FadeTransition(opacity: CurvedAnimation(parent: a, curve: Curves.easeOut), child: child),
+      pageBuilder: (dctx, _, __) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(10),
+          child: Material(
+            color: const Color(0xF20A0A0F),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: th.c, width: 1.2)),
+            child: StatefulBuilder(builder: (dctx, setM) {
+              void pick(int i) {
+                s.select(i);
+                Navigator.of(dctx).pop();
+              }
+
+              final items2 = [for (int i = 0; i < d.tables.length; i++) if (d.tables[i].is2D) i];
+              final items1 = [for (int i = 0; i < d.tables.length; i++) if (!d.tables[i].is2D) i];
+              Widget head(String a) => Padding(
+                    padding: const EdgeInsets.fromLTRB(4, 8, 4, 6),
+                    child: Text(a, style: TextStyle(fontFamily: kFont, fontSize: 10, color: th.c)),
+                  );
+              Widget tile(int i, Widget lead, String sub) {
+                final t = d.tables[i];
+                final on = s.sel == i;
+                return Opacity(
+                  opacity: t.valid ? 1 : 0.4,
+                  child: InkWell(
+                    onTap: t.valid ? () => pick(i) : null,
+                    borderRadius: BorderRadius.circular(8),
+                    child: Container(
+                      margin: const EdgeInsets.only(bottom: 5),
+                      padding: const EdgeInsets.all(6),
+                      decoration: BoxDecoration(
+                        color: on ? th.c.withOpacity(0.2) : Colors.white.withOpacity(0.03),
+                        border: Border.all(color: on ? th.c : Colors.white12, width: on ? 1.5 : 1),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Row(children: [
+                        lead,
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                            Row(children: [
+                              if (t.isLock) const Padding(padding: EdgeInsets.only(right: 4), child: Icon(Icons.lock, size: 13, color: kBad)),
+                              Flexible(child: Text(t.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold))),
+                            ]),
+                            Text(t.valid ? sub : 'อยู่นอกไฟล์ BIN', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 10.5, color: Colors.white54)),
+                          ]),
+                        ),
+                        if (t.valid && s.tableChanged(t))
+                          Container(width: 8, height: 8, decoration: BoxDecoration(color: th.c, shape: BoxShape.circle, boxShadow: [BoxShadow(color: th.c, blurRadius: 5)])),
+                      ]),
+                    ),
+                  ),
+                );
+              }
+
+              String preview(XdfTable t) {
+                if (!t.valid) return '';
+                final vs = <String>[];
+                for (int r = 0; r < t.rows && vs.length < 5; r++) {
+                  for (int cc = 0; cc < t.cols && vs.length < 5; cc++) {
+                    vs.add(t.fmt(s.val(t, r, cc)));
+                  }
+                }
+                return '${t.rows * t.cols > 1 ? '${t.rows}×${t.cols} · ' : ''}${vs.join('  ')}${t.rows * t.cols > 5 ? ' …' : ''}';
+              }
+
+              return Column(children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 6, 4, 0),
+                  child: Row(children: [
+                    Text('เลือกตาราง', style: TextStyle(fontFamily: kFont, fontSize: 12, color: th.c)),
+                    const SizedBox(width: 10),
+                    Expanded(child: Text('${s.xdfName ?? ''} · ${s.binName ?? ''}', overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 11, color: Colors.white38))),
+                    IconButton(onPressed: () => Navigator.of(dctx).pop(), icon: Icon(Icons.close, color: th.c)),
+                  ]),
+                ),
+                Expanded(
+                  child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Expanded(
+                      flex: 5,
+                      child: ListView(padding: const EdgeInsets.fromLTRB(10, 0, 6, 10), children: [
+                        head('ตาราง 2D (${items2.length})'),
+                        for (final i in items2)
+                          tile(
+                            i,
+                            Container(
+                              width: 70, height: 42,
+                              decoration: BoxDecoration(border: Border.all(color: Colors.white24), borderRadius: BorderRadius.circular(3)),
+                              child: d.tables[i].valid ? CustomPaint(painter: _ThumbPainter(s.values(d.tables[i]))) : null,
+                            ),
+                            '${d.tables[i].rows}×${d.tables[i].cols} · @0x${d.tables[i].z.addr.toRadixString(16).toUpperCase()} · ${d.tables[i].eq.src}',
+                          ),
+                      ]),
+                    ),
+                    Container(width: 1, color: Colors.white12, margin: const EdgeInsets.only(bottom: 10)),
+                    Expanded(
+                      flex: 4,
+                      child: ListView(padding: const EdgeInsets.fromLTRB(6, 0, 10, 10), children: [
+                        head('ค่า / แกน 1 มิติ (${items1.length})'),
+                        for (final i in items1)
+                          tile(i, Icon(d.tables[i].rows * d.tables[i].cols == 1 ? Icons.tag : Icons.linear_scale, size: 18, color: th.c2), preview(d.tables[i])),
+                        head('FLAGS (${d.flags.length})'),
+                        for (final f in d.flags)
+                          Opacity(
+                            opacity: f.valid ? 1 : 0.4,
+                            child: InkWell(
+                              onTap: f.valid
+                                  ? () {
+                                      s.setFlag(f, !s.flagOn(f));
+                                      setM(() {});
+                                    }
+                                  : null,
+                              borderRadius: BorderRadius.circular(8),
+                              child: Container(
+                                margin: const EdgeInsets.only(bottom: 5),
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+                                decoration: BoxDecoration(color: Colors.white.withOpacity(0.03), border: Border.all(color: Colors.white12), borderRadius: BorderRadius.circular(8)),
+                                child: Row(children: [
+                                  Expanded(
+                                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                      Text(f.title, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
+                                      Text(
+                                          '@0x${f.d.addr.toRadixString(16).toUpperCase()} bit 0x${f.mask.toRadixString(16).toUpperCase()}'
+                                          '${f.valid && s.flagOn(f) != s.flagOn(f, original: true) ? ' · แก้แล้ว' : ''}',
+                                          style: const TextStyle(fontSize: 10.5, color: Colors.white54)),
+                                    ]),
+                                  ),
+                                  _pill(f.valid && s.flagOn(f), th),
+                                ]),
+                              ),
+                            ),
+                          ),
+                      ]),
+                    ),
+                  ]),
+                ),
+              ]);
+            }),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _pill(bool on, AppTheme th) => Row(mainAxisSize: MainAxisSize.min, children: [
+        Text(on ? 'ON' : 'OFF', style: TextStyle(fontFamily: kFont, fontSize: 9, color: on ? th.c : Colors.white38)),
+        const SizedBox(width: 6),
+        AnimatedContainer(
+          duration: const Duration(milliseconds: 150),
+          width: 44, height: 24,
+          padding: const EdgeInsets.all(3),
+          alignment: on ? Alignment.centerRight : Alignment.centerLeft,
+          decoration: BoxDecoration(
+            color: on ? th.c.withOpacity(0.35) : Colors.white10,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: on ? th.c : Colors.white30),
+          ),
+          child: Container(
+            width: 16, height: 16,
+            decoration: BoxDecoration(shape: BoxShape.circle, color: on ? th.c : Colors.white54, boxShadow: on ? [BoxShadow(color: th.c, blurRadius: 6)] : null),
+          ),
+        ),
+      ]);
+}
+
+// ---------- ตาราง 2D (วาดเฉพาะช่องที่เห็น หัวแถว/หัวคอลัมน์ล็อกอยู่กับที่) ----------
+class _GridPainter extends CustomPainter {
+  final TuneSession s;
+  final XdfTable t;
+  final List<List<double>> v;
+  final double lo, hi, sx, sy, cw, ch, hw, hh;
+  final List<String> rowL, colL;
+  final (int, int, int, int)? sel;
+  final double? lr, lc;
+  final AppTheme th;
+  final int rev;
+  _GridPainter({
+    required this.s, required this.t, required this.v, required this.lo, required this.hi,
+    required this.rowL, required this.colL, required this.sx, required this.sy,
+    required this.cw, required this.ch, required this.hw, required this.hh,
+    required this.sel, required this.lr, required this.lc, required this.th, required this.rev,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width, h = size.height;
+    final nr = t.rows, nc = t.cols;
+    final c0 = math.max(0, (sx / cw).floor()), c1 = math.min(nc - 1, ((sx + w - hw) / cw).ceil());
+    final r0 = math.max(0, (sy / ch).floor()), r1 = math.min(nr - 1, ((sy + h - hh) / ch).ceil());
+    final fs = (ch * 0.48).clamp(8.0, 15.0).toDouble();
+    final span = hi > lo ? hi - lo : 1.0;
+    final fill = Paint();
+    final mark = Paint()..color = Colors.white;
+    final g = sel;
+    final lrI = lr?.round(), lcI = lc?.round();
+    double cx(int c) => hw + c * cw - sx;
+    double cy(int r) => hh + r * ch - sy;
+
+    // ช่องค่า
+    canvas.save();
+    canvas.clipRect(Rect.fromLTWH(hw, hh, w - hw, h - hh));
+    for (int r = r0; r <= r1; r++) {
+      for (int c = c0; c <= c1; c++) {
+        final rect = Rect.fromLTWH(cx(c), cy(r), cw, ch);
+        final x = v[r][c];
+        final col = _heat(hi > lo ? (x - lo) / span : 0.5);
+        fill.color = col;
+        canvas.drawRect(rect.deflate(0.5), fill);
+        final dark = col.computeLuminance() > 0.42;
+        _TP.center(canvas, _TP.get(t.fmt(x), fs, dark ? const Color(0xFF101010) : Colors.white, maxW: cw - 2), rect.center);
+        if (s.cellChanged(t, r, c)) {
+          // ช่องที่ต่างจากไฟล์ต้นฉบับ: สามเหลี่ยมมุมขวาบน
+          final p = Path()
+            ..moveTo(rect.right - 8, rect.top + 0.5)
+            ..lineTo(rect.right - 0.5, rect.top + 0.5)
+            ..lineTo(rect.right - 0.5, rect.top + 8)
+            ..close();
+          canvas.drawPath(p, mark);
+        }
+      }
+    }
+    if (g != null) {
+      final rr = Rect.fromLTRB(cx(g.$2), cy(g.$1), cx(g.$4) + cw, cy(g.$3) + ch);
+      canvas.drawRect(rr, Paint()..color = th.c.withOpacity(0.22));
+      canvas.drawRect(rr.deflate(1), Paint()
+        ..color = th.c
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.2);
+    }
+    if (lrI != null && lcI != null) {
+      final rr = Rect.fromLTWH(cx(lcI), cy(lrI), cw, ch);
+      canvas.drawRect(rr.inflate(1), Paint()
+        ..color = th.c.withOpacity(0.8)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 5
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4));
+      canvas.drawRect(rr, Paint()
+        ..color = Colors.white
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.4);
+      // จุดตำแหน่งสดจริง (ระหว่างช่อง)
+      final dp = Offset(hw + (lc! + 0.5) * cw - sx, hh + (lr! + 0.5) * ch - sy);
+      canvas.drawCircle(dp, 4, Paint()..color = Colors.black);
+      canvas.drawCircle(dp, 2.6, Paint()..color = th.c);
+    }
+    canvas.restore();
+
+    // หัวคอลัมน์ (ล็อกด้านบน)
+    final hb = Paint()..color = const Color(0xFF15151C);
+    final hs = Paint()..color = th.c.withOpacity(0.28);
+    canvas.save();
+    canvas.clipRect(Rect.fromLTWH(hw, 0, w - hw, hh));
+    canvas.drawRect(Rect.fromLTWH(hw, 0, w - hw, hh), hb);
+    for (int c = c0; c <= c1; c++) {
+      final rect = Rect.fromLTWH(cx(c), 0, cw, hh);
+      final inSel = g != null && c >= g.$2 && c <= g.$4;
+      if (inSel) canvas.drawRect(rect.deflate(0.5), hs);
+      final isLive = lcI == c;
+      _TP.center(canvas, _TP.get(c < colL.length ? colL[c] : '', 10.5, isLive ? th.c : (inSel ? Colors.white : Colors.white70), bold: isLive, maxW: cw - 2), rect.center);
+    }
+    canvas.restore();
+
+    // หัวแถว (ล็อกด้านซ้าย)
+    canvas.save();
+    canvas.clipRect(Rect.fromLTWH(0, hh, hw, h - hh));
+    canvas.drawRect(Rect.fromLTWH(0, hh, hw, h - hh), hb);
+    for (int r = r0; r <= r1; r++) {
+      final rect = Rect.fromLTWH(0, cy(r), hw, ch);
+      final inSel = g != null && r >= g.$1 && r <= g.$3;
+      if (inSel) canvas.drawRect(rect.deflate(0.5), hs);
+      final isLive = lrI == r;
+      final tp = _TP.get(r < rowL.length ? rowL[r] : '', 10.5, isLive ? th.c : (inSel ? Colors.white : Colors.white70), bold: isLive, maxW: hw - 8);
+      tp.paint(canvas, Offset(hw - 5 - tp.width, rect.center.dy - tp.height / 2));
+    }
+    canvas.restore();
+
+    // มุมซ้ายบน + เส้นแบ่งหัวตาราง
+    canvas.drawRect(Rect.fromLTWH(0, 0, hw, hh), Paint()..color = const Color(0xFF1C1C25));
+    _TP.center(canvas, _TP.get('$nr×$nc', 9.5, Colors.white38, maxW: hw - 4), Offset(hw / 2, hh / 2));
+    final ln = Paint()
+      ..color = th.c.withOpacity(0.7)
+      ..strokeWidth = 1.2;
+    canvas.drawLine(Offset(0, hh), Offset(w, hh), ln);
+    canvas.drawLine(Offset(hw, 0), Offset(hw, h), ln);
+
+    // แถบบอกตำแหน่งเลื่อน
+    final sb = Paint()..color = th.c.withOpacity(0.55);
+    final tw = nc * cw, vw = w - hw;
+    if (tw > vw && vw > 0) {
+      final bw = math.max(24.0, vw * vw / tw);
+      canvas.drawRRect(RRect.fromRectAndRadius(Rect.fromLTWH(hw + (vw - bw) * (sx / (tw - vw)), h - 3, bw, 3), const Radius.circular(2)), sb);
+    }
+    final tht = nr * ch, vh = h - hh;
+    if (tht > vh && vh > 0) {
+      final bh = math.max(20.0, vh * vh / tht);
+      canvas.drawRRect(RRect.fromRectAndRadius(Rect.fromLTWH(w - 3, hh + (vh - bh) * (sy / (tht - vh)), 3, bh), const Radius.circular(2)), sb);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_GridPainter o) => true;
+}
+
+// ---------- ภาพย่อ heatmap ในเมนูตาราง ----------
+class _ThumbPainter extends CustomPainter {
+  final List<List<double>> v;
+  _ThumbPainter(this.v);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (v.isEmpty || v[0].isEmpty) return;
+    double lo = double.infinity, hi = double.negativeInfinity;
+    for (final row in v) {
+      for (final x in row) {
+        if (x.isNaN) continue;
+        lo = math.min(lo, x);
+        hi = math.max(hi, x);
+      }
+    }
+    final nr = v.length, nc = v[0].length;
+    final cw = size.width / nc, ch = size.height / nr;
+    final p = Paint();
+    for (int r = 0; r < nr; r++) {
+      for (int c = 0; c < nc; c++) {
+        p.color = _heat(hi > lo ? (v[r][c] - lo) / (hi - lo) : 0.5);
+        canvas.drawRect(Rect.fromLTWH(c * cw, r * ch, cw + 0.4, ch + 0.4), p);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_ThumbPainter o) => true;
+}
+
+// ---------- มุมมอง 3D (ลากหมุน, 2 นิ้วซูม, แตะ 2 ครั้งรีเซ็ต) ----------
+class _SurfacePainter extends CustomPainter {
+  final List<List<double>> v;
+  final double lo, hi, yaw, pitch, zoom;
+  final double? lr, lc;
+  final AppTheme th;
+  final List<String> rowL, colL;
+  final XdfTable t;
+  _SurfacePainter({
+    required this.v, required this.lo, required this.hi, required this.yaw, required this.pitch, required this.zoom,
+    required this.lr, required this.lc, required this.th, required this.rowL, required this.colL, required this.t,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final nr = v.length, nc = v[0].length;
+    if (nr < 2 || nc < 2) return;
+    final sc = math.min(size.width * 0.36, size.height * 0.62) * zoom;
+    final ox = size.width * 0.47, oy = size.height * 0.52;
+    final cyw = math.cos(yaw), syw = math.sin(yaw), cp = math.cos(pitch), sp = math.sin(pitch);
+    final span = hi > lo ? hi - lo : 1.0;
+
+    (Offset, double) pt(double r, double c, double val) {
+      final x = c / (nc - 1) * 2 - 1;
+      final y = r / (nr - 1) * 2 - 1;
+      final z = ((val - lo) / span - 0.5) * 0.9;
+      final xr = x * cyw - y * syw, yr = x * syw + y * cyw;
+      return (Offset(ox + xr * sc, oy + (yr * sp - z * cp) * sc), yr * cp + z * sp);
+    }
+
+    // กรอบฐาน
+    final base = Paint()
+      ..color = Colors.white24
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1;
+    final b0 = pt(0, 0, lo).$1, b1 = pt(0, nc - 1.0, lo).$1, b2 = pt(nr - 1.0, nc - 1.0, lo).$1, b3 = pt(nr - 1.0, 0, lo).$1;
+    canvas.drawPath(Path()
+      ..moveTo(b0.dx, b0.dy)
+      ..lineTo(b1.dx, b1.dy)
+      ..lineTo(b2.dx, b2.dy)
+      ..lineTo(b3.dx, b3.dy)
+      ..close(), base);
+
+    // ผิว: เรียงจากไกลไปใกล้
+    final quads = <(double, Path, Color)>[];
+    for (int r = 0; r < nr - 1; r++) {
+      for (int c = 0; c < nc - 1; c++) {
+        final q0 = pt(r.toDouble(), c.toDouble(), v[r][c]);
+        final q1 = pt(r.toDouble(), c + 1.0, v[r][c + 1]);
+        final q2 = pt(r + 1.0, c + 1.0, v[r + 1][c + 1]);
+        final q3 = pt(r + 1.0, c.toDouble(), v[r + 1][c]);
+        final avg = (v[r][c] + v[r][c + 1] + v[r + 1][c + 1] + v[r + 1][c]) / 4;
+        quads.add((
+          (q0.$2 + q1.$2 + q2.$2 + q3.$2) / 4,
+          Path()
+            ..moveTo(q0.$1.dx, q0.$1.dy)
+            ..lineTo(q1.$1.dx, q1.$1.dy)
+            ..lineTo(q2.$1.dx, q2.$1.dy)
+            ..lineTo(q3.$1.dx, q3.$1.dy)
+            ..close(),
+          _heat((avg - lo) / span),
+        ));
+      }
+    }
+    quads.sort((a, b) => a.$1.compareTo(b.$1));
+    final fill = Paint();
+    final edge = Paint()
+      ..color = const Color(0x8C000000)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 0.7;
+    for (final q in quads) {
+      fill.color = q.$3;
+      canvas.drawPath(q.$2, fill);
+      canvas.drawPath(q.$2, edge);
+    }
+
+    // ป้ายแกน
+    final stc = math.max(1, (nc / 6).ceil()), str = math.max(1, (nr / 6).ceil());
+    for (int c = 0; c < nc; c += stc) {
+      _TP.center(canvas, _TP.get(c < colL.length ? colL[c] : '', 9.5, Colors.white60), pt(nr - 1 + 0.9, c.toDouble(), lo).$1);
+    }
+    for (int r = 0; r < nr; r += str) {
+      _TP.center(canvas, _TP.get(r < rowL.length ? rowL[r] : '', 9.5, Colors.white60), pt(r.toDouble(), -1.4, lo).$1);
+    }
+
+    // LIVE
+    final a = lr, b = lc;
+    if (a != null && b != null) {
+      final val = _bilin(v, a, b);
+      final p0 = pt(a, b, lo).$1, p1 = pt(a, b, val).$1;
+      canvas.drawLine(p0, p1, Paint()
+        ..color = Colors.white70
+        ..strokeWidth = 1.4);
+      canvas.drawCircle(p1, 9, Paint()
+        ..color = th.c.withOpacity(0.6)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6));
+      canvas.drawCircle(p1, 5, Paint()..color = th.c);
+      canvas.drawCircle(p1, 5, Paint()
+        ..color = Colors.white
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.5);
+      final tp = _TP.get('LIVE ${t.fmt(val)}', 11, Colors.white, bold: true);
+      final r = Rect.fromLTWH(p1.dx + 10, p1.dy - 22, tp.width + 10, tp.height + 4);
+      canvas.drawRRect(RRect.fromRectAndRadius(r, const Radius.circular(4)), Paint()..color = th.c.withOpacity(0.85));
+      tp.paint(canvas, r.topLeft + const Offset(5, 2));
+    }
+
+    // แถบสี lo..hi
+    final lg = Rect.fromLTWH(size.width - 22, 24, 10, size.height - 60);
+    canvas.drawRect(
+        lg,
+        Paint()
+          ..shader = LinearGradient(
+            begin: Alignment.bottomCenter,
+            end: Alignment.topCenter,
+            colors: [for (int k = 0; k <= 5; k++) _heat(k / 5)],
+          ).createShader(lg));
+    final thi = _TP.get(t.fmt(hi), 9.5, Colors.white70), tlo = _TP.get(t.fmt(lo), 9.5, Colors.white70);
+    thi.paint(canvas, Offset(size.width - 8 - thi.width, 8));
+    tlo.paint(canvas, Offset(size.width - 8 - tlo.width, lg.bottom + 4));
+    final hint = _TP.get('ลาก: หมุน · 2 นิ้ว: ซูม · แตะ 2 ครั้ง: รีเซ็ต', 9.5, Colors.white30);
+    hint.paint(canvas, Offset(8, size.height - hint.height - 4));
+  }
+
+  @override
+  bool shouldRepaint(_SurfacePainter o) => true;
+}
+
+// ---------- กราฟแท่ง (ตาราง/แกน 1 มิติ) ----------
+class _BarsPainter extends CustomPainter {
+  final List<double> v;
+  final List<String> labels;
+  final double lo, hi;
+  final double? lf;
+  final AppTheme th;
+  final XdfTable t;
+  _BarsPainter({required this.v, required this.labels, required this.lo, required this.hi, required this.lf, required this.th, required this.t});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final n = v.length;
+    if (n == 0) return;
+    const pl = 10.0, pr = 10.0, pt = 22.0, pb = 24.0;
+    final w = size.width - pl - pr, h = size.height - pt - pb;
+    final bw = w / n;
+    final lo0 = math.min(0.0, lo);
+    final span = hi > lo0 ? hi - lo0 : 1.0;
+    final y0 = pt + h - ((0 - lo0) / span) * h;
+    final grid = Paint()
+      ..color = Colors.white12
+      ..strokeWidth = 1;
+    for (int k = 0; k <= 4; k++) {
+      canvas.drawLine(Offset(pl, pt + h * k / 4), Offset(pl + w, pt + h * k / 4), grid);
+    }
+    final every = math.max(1, (34 / bw).ceil());
+    for (int i = 0; i < n; i++) {
+      final x = v[i];
+      final y = pt + h - ((x - lo0) / span) * h;
+      final r = Rect.fromLTRB(pl + i * bw + bw * 0.12, math.min(y, y0), pl + (i + 1) * bw - bw * 0.12, math.max(y, y0) + 0.5);
+      canvas.drawRRect(RRect.fromRectAndRadius(r, const Radius.circular(2)), Paint()..color = _heat(hi > lo ? (x - lo) / (hi - lo) : 0.5));
+      if (i % every == 0) {
+        _TP.center(canvas, _TP.get(t.fmt(x), 9.5, Colors.white, maxW: bw * every), Offset(r.center.dx, math.min(y, y0) - 8));
+        _TP.center(canvas, _TP.get(i < labels.length ? labels[i] : '', 9.5, Colors.white54, maxW: bw * every), Offset(r.center.dx, size.height - pb / 2));
+      }
+    }
+    final f = lf;
+    if (f != null) {
+      final x = pl + (f + 0.5) * bw;
+      canvas.drawLine(Offset(x, pt - 6), Offset(x, pt + h), Paint()
+        ..color = th.c
+        ..strokeWidth = 2);
+      final tp = _TP.get('LIVE', 10, th.c, bold: true);
+      tp.paint(canvas, Offset(x + 4, pt - 18));
+    }
+  }
+
+  @override
+  bool shouldRepaint(_BarsPainter o) => true;
 }
