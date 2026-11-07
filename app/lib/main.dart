@@ -4027,8 +4027,12 @@ class _TunePageState extends State<TunePage> {
       setState(() => _spin = null);
       return;
     }
-    _spin = Timer.periodic(const Duration(milliseconds: 33), (_) {
-      if (mounted) setState(() => yaw += 0.014);
+    _spin = Timer.periodic(const Duration(milliseconds: 16), (_) {
+      if (!mounted) return;
+      setState(() {
+        yaw += 0.0075;                                           // หมุนวนทางเดียวต่อเนื่อง (~14 วินาที/รอบ)
+        if (yaw > math.pi * 2) yaw -= math.pi * 2;
+      });
     });
     setState(() {});
   }
@@ -4060,13 +4064,15 @@ class _TunePageState extends State<TunePage> {
               _topBar(th),
               SizedBox(
                 height: 17,
-                child: Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text('BIN: ${s.binName ?? '-'}     XDF: ${s.xdfName ?? '-'}',
-                      maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 10.5, color: Colors.white54)),
-                ),
+                child: Row(children: [
+                  Expanded(
+                    child: Text('BIN: ${s.binName ?? '-'}     XDF: ${s.xdfName ?? '-'}',
+                        maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 10.5, color: Colors.white54)),
+                  ),
+                  if (s.ready && t != null && t.valid) Text(_selInfo(t), style: const TextStyle(fontSize: 10.5, color: Colors.white60)),
+                ]),
               ),
-              if (s.ready && t != null) ...[_infoBar(th, t), const SizedBox(height: 4)],
+              const SizedBox(height: 2),
               Expanded(child: _body(th)),
             ]),
           ),
@@ -4079,7 +4085,7 @@ class _TunePageState extends State<TunePage> {
     final cc = col ?? th.c;
     return Padding(
       key: key,
-      padding: const EdgeInsets.only(right: 5),
+      padding: const EdgeInsets.only(right: 4),
       child: Opacity(
         opacity: onTap == null ? 0.4 : 1,
         child: InkWell(
@@ -4088,7 +4094,7 @@ class _TunePageState extends State<TunePage> {
           child: Container(
             height: 34,
             width: width,
-            padding: const EdgeInsets.symmetric(horizontal: 9),
+            padding: const EdgeInsets.symmetric(horizontal: 8),
             alignment: Alignment.center,
             decoration: BoxDecoration(
               color: active ? cc.withOpacity(0.3) : Colors.black45,
@@ -4103,7 +4109,7 @@ class _TunePageState extends State<TunePage> {
     );
   }
 
-  Widget _sep() => Container(width: 1, height: 22, margin: const EdgeInsets.only(right: 5), color: Colors.white24);
+  Widget _sep() => Container(width: 1, height: 22, margin: const EdgeInsets.only(right: 4), color: Colors.white24);
 
   Widget _topBar(AppTheme th) {
     final t = s.table;
@@ -4113,15 +4119,7 @@ class _TunePageState extends State<TunePage> {
     return SizedBox(
       height: 34,
       child: Row(children: [
-        _tb(
-          th,
-          Row(mainAxisSize: MainAxisSize.min, children: [
-            Icon(Icons.arrow_back, size: 16, color: th.c),
-            const SizedBox(width: 4),
-            const Text('HOME'),
-          ]),
-          () => Navigator.of(context).pop(),
-        ),
+        _tb(th, Icon(Icons.arrow_back, size: 18, color: th.c), () => Navigator.of(context).pop(), width: 38),
         Expanded(
           child: SingleChildScrollView(
             scrollDirection: Axis.horizontal,
@@ -4130,10 +4128,8 @@ class _TunePageState extends State<TunePage> {
               _tb(
                 th,
                 Row(mainAxisSize: MainAxisSize.min, children: [
-                  Icon(Icons.grid_on, size: 15, color: th.c),
-                  const SizedBox(width: 5),
                   ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 130),
+                    constraints: const BoxConstraints(maxWidth: 100),
                     child: Text(t?.title ?? 'ตารางจูน', maxLines: 1, overflow: TextOverflow.ellipsis),
                   ),
                   const Text(' ▾'),
@@ -4151,15 +4147,15 @@ class _TunePageState extends State<TunePage> {
                 can ? _okTable : null,
                 col: kGreen,
                 active: dirty,
-                width: 50,
+                width: 42,
               ),
-              _tb(th, const Text('❌', style: TextStyle(fontSize: 15)), can ? _cancelTable : null, col: kBad, width: 50),
+              _tb(th, const Text('❌', style: TextStyle(fontSize: 15)), can ? _cancelTable : null, col: kBad, width: 42),
               _sep(),
               // ช่องใส่ค่าที่จะเปลี่ยน: − + = เพิ่ม/ลดเท่าค่านี้ | % = เปลี่ยนเป็น % | = = ตั้งเป็นค่านี้ (ว่าง = ใช้ STEP / ถามค่า)
               Padding(
                 padding: const EdgeInsets.only(right: 5),
                 child: SizedBox(
-                  width: 92,
+                  width: 76,
                   height: 34,
                   child: TextField(
                     controller: amtCtl,
@@ -4181,9 +4177,9 @@ class _TunePageState extends State<TunePage> {
                 ),
               ),
               Opacity(opacity: can ? 1 : 0.4, child: StepBtn(label: '−', onStep: () => can ? _bump(-1) : null, th: th)),
-              const SizedBox(width: 5),
+              const SizedBox(width: 4),
               Opacity(opacity: can ? 1 : 0.4, child: StepBtn(label: '+', onStep: () => can ? _bump(1) : null, th: th)),
-              const SizedBox(width: 5),
+              const SizedBox(width: 4),
               _tb(th, const Text('%', style: TextStyle(fontSize: 15)), can ? _pct : null),
               _tb(th, const Text('=', style: TextStyle(fontSize: 15)), can ? () => _setVal() : null),
               _sep(),
@@ -4192,7 +4188,7 @@ class _TunePageState extends State<TunePage> {
               _sep(),
               _tb(
                 th,
-                Row(mainAxisSize: MainAxisSize.min, children: [Icon(Icons.fit_screen, size: 16, color: th.c), const SizedBox(width: 4), const Text('FIT')]),
+                const Text('FIT'),
                 can ? _fit : null,
               ),
               _tb(
@@ -4290,11 +4286,7 @@ class _TunePageState extends State<TunePage> {
           padding: const EdgeInsets.symmetric(horizontal: 9),
           alignment: Alignment.center,
           decoration: BoxDecoration(color: Colors.black45, border: Border.all(color: th.c, width: 1.3), borderRadius: BorderRadius.circular(8)),
-          child: Row(mainAxisSize: MainAxisSize.min, children: [
-            Icon(Icons.description, size: 15, color: th.c),
-            const SizedBox(width: 5),
-            const Text('ไฟล์ ▾', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
-          ]),
+          child: const Text('ไฟล์ ▾', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
         ),
       ),
     );
@@ -4311,45 +4303,20 @@ class _TunePageState extends State<TunePage> {
         ),
       ]);
 
-  Widget _infoBar(AppTheme th, XdfTable t) {
+  /// ข้อความเล็กท้ายบรรทัดชื่อไฟล์: ค่าช่องที่เลือก + LIVE
+  String _selInfo(XdfTable t) {
     final cells = _cells;
-    String selTxt = 'แตะ/ลากเพื่อเลือกช่อง';
-    if (cells.isNotEmpty && t.valid && s.bin != null) {
+    String a = '';
+    if (cells.isNotEmpty && s.bin != null) {
       final vs = cells.map((rc) => s.val(t, rc.$1, rc.$2)).toList();
-      final avg = vs.reduce((a, b) => a + b) / vs.length;
-      selTxt = cells.length == 1
-          ? 'ค่า ${t.fmt(avg)}${t.outType == 3 ? ' (${avg.round()})' : ''}'
-          : 'เลือก ${cells.length} ช่อง · เฉลี่ย ${avg.toStringAsFixed(math.min(6, t.dec + 1))} · ${t.fmt(vs.reduce(math.min))}…${t.fmt(vs.reduce(math.max))}';
+      final avg = vs.reduce((x, y) => x + y) / vs.length;
+      a = cells.length == 1 ? 'ค่า ${t.fmt(avg)}' : '${cells.length} ช่อง · เฉลี่ย ${avg.toStringAsFixed(math.min(6, t.dec + 1))}';
     }
-    final rpm = c.t.rpm, tps = c.t.tps;
-    final liveTxt = !live ? 'LIVE ปิด' : (_liveData ? 'RPM ${rpm?.round() ?? '--'} · TPS ${tps?.toStringAsFixed(1) ?? '--'}' : 'LIVE: ไม่มีข้อมูล ECU');
-    const small = TextStyle(fontSize: 11.5, color: Colors.white70);
-    return Container(
-      height: 26,
-      padding: const EdgeInsets.symmetric(horizontal: 8),
-      decoration: BoxDecoration(color: const Color(0xCC0B0B10), borderRadius: BorderRadius.circular(6), border: Border.all(color: th.c.withOpacity(0.4))),
-      child: Row(children: [
-        if (t.isLock) Padding(padding: const EdgeInsets.only(right: 4), child: Icon(s.lockOk ? Icons.lock_open : Icons.lock, size: 14, color: kBad)),
-        Flexible(
-          child: Text('${t.title}  ${t.rows}×${t.cols}  @0x${t.z.addr.toRadixString(16).toUpperCase().padLeft(4, '0')}  ${t.eq.src}',
-              maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12, color: th.c2, fontWeight: FontWeight.bold)),
-        ),
-        if (s.tableDirty(t)) const Padding(padding: EdgeInsets.only(left: 8), child: Text('● ยังไม่กด ✅', style: TextStyle(fontSize: 11, color: kAmber))),
-        const SizedBox(width: 10),
-        Text(selTxt, style: small),
-        const SizedBox(width: 10),
-        InkWell(
-          onTap: () => setState(() => stepMul = const {1: 5, 5: 10, 10: 50}[stepMul] ?? 1),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-            decoration: BoxDecoration(border: Border.all(color: Colors.white24), borderRadius: BorderRadius.circular(4)),
-            child: Text('STEP ${_numStr(_step(t))} ×$stepMul', style: small),
-          ),
-        ),
-        const SizedBox(width: 10),
-        Text(liveTxt, style: TextStyle(fontSize: 11.5, color: live && _liveData ? kGreen : Colors.white38)),
-      ]),
-    );
+    if (live && _liveData) {
+      final l = 'RPM ${c.t.rpm?.round() ?? '--'} · TPS ${c.t.tps?.toStringAsFixed(1) ?? '--'}';
+      a = a.isEmpty ? l : '$a     $l';
+    }
+    return a;
   }
 
   /// การ์ดตอนยังไม่ได้เลือกไฟล์/ตาราง
@@ -4756,8 +4723,8 @@ class _GridPainter extends CustomPainter {
     final nr = t.rows, nc = t.cols;
     final c0 = math.max(0, (sx / cw).floor()), c1 = math.min(nc - 1, ((sx + w - hw) / cw).ceil());
     final r0 = math.max(0, (sy / ch).floor()), r1 = math.min(nr - 1, ((sy + h - hh) / ch).ceil());
-    final fs = math.min(ch * 0.48, cw * 0.26).clamp(7.0, 15.0).toDouble();
-    final showTxt = ch >= 12 && cw >= 24;
+    final fs = math.min(math.min(ch * 0.72, cw * 0.26), 15.0);
+    final showTxt = fs >= 4.5;                                   // ย่อเล็กแค่ไหนก็ยังแสดงตัวเลข (ตัวเล็กลงตามช่อง)
     final mk = (math.min(cw, ch) * 0.3).clamp(3.0, 8.0).toDouble();
     final span = hi > lo ? hi - lo : 1.0;
     final fill = Paint();
@@ -4779,7 +4746,7 @@ class _GridPainter extends CustomPainter {
         canvas.drawRect(rect.deflate(cw > 16 ? 0.5 : 0.2), fill);
         if (showTxt) {
           final dark = col.computeLuminance() > 0.42;
-          _TP.center(canvas, _TP.get(t.fmt(x), fs, dark ? const Color(0xFF101010) : Colors.white, maxW: cw - 2), rect.center);
+          _TP.center(canvas, _TP.get(t.fmt(x), fs, dark ? const Color(0xFF101010) : Colors.white, maxW: cw), rect.center);
         }
         if (s.cellChanged(t, r, c)) {
           canvas.drawPath(
@@ -4829,8 +4796,9 @@ class _GridPainter extends CustomPainter {
     // หัวคอลัมน์ (ล็อกด้านบน) — ตารางย่อเล็กมากแสดงป้ายเว้นระยะ
     final hb = Paint()..color = const Color(0xFF15151C);
     final hs = Paint()..color = th.c.withOpacity(0.28);
-    final everyC = cw >= 30 ? 1 : (30 / cw).ceil();
-    final everyR = ch >= 13 ? 1 : (13 / ch).ceil();
+    final hfc = math.min(10.5, math.max(6.0, cw * 0.3)), hfr = math.min(10.5, math.max(6.0, ch * 0.85));
+    final everyC = cw >= 20 ? 1 : (20 / cw).ceil();
+    final everyR = ch >= 7 ? 1 : (7 / ch).ceil();
     canvas.save();
     canvas.clipRect(Rect.fromLTWH(hw, 0, w - hw, hh));
     canvas.drawRect(Rect.fromLTWH(hw, 0, w - hw, hh), hb);
@@ -4840,7 +4808,7 @@ class _GridPainter extends CustomPainter {
       if (inSel) canvas.drawRect(rect.deflate(0.5), hs);
       final isLive = lcI == c;
       if (c % everyC == 0 || isLive) {
-        _TP.center(canvas, _TP.get(c < colL.length ? colL[c] : '', 10.5, isLive ? th.c : (inSel ? Colors.white : Colors.white70), bold: isLive, maxW: cw * everyC - 2), rect.center);
+        _TP.center(canvas, _TP.get(c < colL.length ? colL[c] : '', hfc, isLive ? th.c : (inSel ? Colors.white : Colors.white70), bold: isLive, maxW: cw * everyC), rect.center);
       }
     }
     canvas.restore();
@@ -4855,7 +4823,7 @@ class _GridPainter extends CustomPainter {
       if (inSel) canvas.drawRect(rect.deflate(0.5), hs);
       final isLive = lrI == r;
       if (r % everyR == 0 || isLive) {
-        final tp = _TP.get(r < rowL.length ? rowL[r] : '', 10.5, isLive ? th.c : (inSel ? Colors.white : Colors.white70), bold: isLive, maxW: hw - 8);
+        final tp = _TP.get(r < rowL.length ? rowL[r] : '', hfr, isLive ? th.c : (inSel ? Colors.white : Colors.white70), bold: isLive, maxW: hw - 8);
         tp.paint(canvas, Offset(hw - 5 - tp.width, rect.center.dy - tp.height / 2));
       }
     }
@@ -4944,12 +4912,16 @@ class _SurfacePainter extends CustomPainter {
     final span = hi > lo ? hi - lo : 1.0;
     const zh = 1.15; // ความสูงแกน Z เทียบความกว้างฐาน
 
+    // มุมมองแบบมีระยะลึก: ส่วนที่อยู่ใกล้ใหญ่กว่า -> ตอนหมุนพรีวิวเห็นชัดว่าหมุนรอบ ไม่ดูเหมือนแกว่งไป-กลับ
+    const camD = 6.0;
     (Offset, double) pt(double r, double c, double val) {
       final x = c / (nc - 1) * 2 - 1;
       final y = r / (nr - 1) * 2 - 1;
       final z = ((val - lo) / span - 0.5) * zh;
       final xr = x * cyw - y * syw, yr = x * syw + y * cyw;
-      return (Offset(ox + xr * sc, oy + (yr * sp - z * cp) * sc), yr * cp + z * sp);
+      final depth = yr * cp + z * sp;
+      final k = camD / (camD - depth);
+      return (Offset(ox + xr * sc * k, oy + (yr * sp - z * cp) * sc * k), depth);
     }
 
     // พื้นฐาน + เส้นตาราง
