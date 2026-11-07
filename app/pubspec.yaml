@@ -34,7 +34,7 @@ flutter:
   assets:
     - assets/bg.jpg
     - assets/splash.jpg
-    - assets/originals/
+    - assets/original/
   fonts:
     - family: Ethnocentric
       fonts:
