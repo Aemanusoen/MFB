@@ -3289,7 +3289,7 @@ class _TP {
   static void center(Canvas cv, TextPainter tp, Offset c) => tp.paint(cv, c - Offset(tp.width / 2, tp.height / 2));
 }
 
-// ---------- ไฟล์ต้นฉบับ (ORIGINAL) ที่มากับแอพ : app/assets/originals/ ----------
+// ---------- ไฟล์ต้นฉบับ (ORIGINAL) ที่มากับแอพ : app/assets/original/ ----------
 class OrigPack {
   final String name, bin, xdf;
   const OrigPack(this.name, this.bin, this.xdf);
@@ -3298,7 +3298,7 @@ class OrigPack {
 }
 
 const kOriginals = <OrigPack>[
-  OrigPack('K03-H01', 'assets/originals/K03-H01__8000-0.bin', 'assets/originals/K03-H01_unlock.xdf'),
+  OrigPack('K03-H01', 'assets/original/K03-H01.bin', 'assets/original/K03-H01.xdf'),
 ];
 
 /// เลือกไฟล์จากเครื่องเฉพาะนามสกุลที่กำหนด (bin / xdf) ; คืน (ชื่อไฟล์, ไบต์) หรือ null
@@ -3881,7 +3881,7 @@ class _TunePageState extends State<TunePage> {
     } on XdfError catch (e) {
       await _showXdfError(e.msg);
     } catch (e) {
-      _snack('เปิดไฟล์ในแอปไม่ได้: $e (ตรวจว่าใส่ไฟล์ไว้ใน assets/originals แล้ว)');
+      _snack('เปิดไฟล์ในแอปไม่ได้: $e (ตรวจว่าใส่ไฟล์ไว้ใน assets/original แล้ว)');
     }
   }
 
