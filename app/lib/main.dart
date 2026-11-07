@@ -13,7 +13,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
-import 'package:xml/xml.dart' show XmlDocument, XmlElement;
+import 'package:xml/xml.dart';
 
 // ---------- BLE UUIDs (ต้องตรงกับ BleGauge.h) ----------
 final Guid kSvc = Guid('7a0f0001-5a41-5201-9c11-2a52a1c0de01');
