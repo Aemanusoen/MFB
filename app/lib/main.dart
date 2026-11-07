@@ -253,6 +253,39 @@ class GaugeController extends ChangeNotifier {
   double _dPrev = 0, _dDist = 0, _dT = 0;
   int _dStill = 0;
 
+  // ----- นาฬิกาจับเวลาแบบวิ่งจริง (ไม่ค้างรอ GPS) -----
+  /// ความเร็วที่ถือว่า "ออกตัว" (เริ่มจับเวลาเมื่อความเร็วผ่านค่านี้ขึ้นไป)
+  static const double dragStartKmh = 5.0;
+  /// เวลาที่แสดงบนนาฬิกา (วินาที) อัปเดต ~60 ครั้ง/วินาที เฉพาะตัวเลขนาฬิกา ไม่วาดทั้งหน้าใหม่
+  final ValueNotifier<double> dragClock = ValueNotifier<double>(0);
+  final Stopwatch _dSw = Stopwatch(); // นาฬิกาเครื่อง (monotonic) ใช้แสดงเวลาวิ่งระหว่างรอค่า GPS ถัดไป
+  double _dSwOffset = 0; // เวลาที่ผ่านไปแล้วตั้งแต่จุดออกตัว ณ ตอนเริ่ม stopwatch
+  Timer? _dTick;
+  double? _rPrevKmh; // ค่า GPS ก่อนหน้าในสถานะ READY (ใช้หาจังหวะผ่าน 5 km/h)
+  DateTime? _rPrevTs;
+
+  /// พร้อมออกตัว = ค่าล่าสุดยังต่ำกว่า 5 km/h (ถ้ากำลังวิ่งอยู่แล้วต้องชะลอให้ต่ำกว่า 5 ก่อน)
+  bool get dragArmed => _rPrevKmh != null && _rPrevKmh! < dragStartKmh;
+
+  void _clockStart(double elapsedAtStart) {
+    _dSwOffset = elapsedAtStart;
+    _dSw
+      ..reset()
+      ..start();
+    _dTick?.cancel();
+    _dTick = Timer.periodic(const Duration(milliseconds: 16), (_) {
+      dragClock.value = _dSwOffset + _dSw.elapsedMicroseconds / 1e6;
+    });
+    dragClock.value = elapsedAtStart;
+  }
+
+  void _clockStop(double finalSecs) {
+    _dTick?.cancel();
+    _dTick = null;
+    _dSw.stop();
+    dragClock.value = finalSecs;
+  }
+
   bool get dragFull => runs[dragSel].hasData && dragSt != DragSt.run;
 
   Future<void> _dragLoad() async {
@@ -283,6 +316,7 @@ class GaugeController extends ChangeNotifier {
     if (defaultTargetPlatform != TargetPlatform.android) return;
     _gnssSub?.cancel();
     _gnssSub = _gnss.receiveBroadcastStream().listen((e) {
+      if (demo) return; // DEMO จำลองดาวเทียมเอง
       if (e is Map) {
         satUsed = (e['used'] as num?)?.toInt();
         satTotal = (e['visible'] as num?)?.toInt();
@@ -296,6 +330,7 @@ class GaugeController extends ChangeNotifier {
   }
 
   Future<void> _dragSave() async {
+    if (demo) return; // รอบที่วิ่งใน DEMO ไม่บันทึกทับ LOG จริง
     try {
       final p = await SharedPreferences.getInstance();
       await p.setString('drag', jsonEncode(runs.map((r) => r.toJson()).toList()));
@@ -317,12 +352,16 @@ class GaugeController extends ChangeNotifier {
     dragSt = DragSt.ready;
     dragMeters = 0;
     dragSecs = 0;
+    _clockStop(0);
     _dragSave();
     notifyListeners();
   }
 
   void _dragFinish() {
     final run = runs[dragSel];
+    final fin = run.t[3] ?? _dT; // ถึง 1000 m = เวลาที่ 1000 m พอดี, หยุดก่อน = เวลาล่าสุด
+    dragSecs = fin;
+    _clockStop(run.t[0] == null ? 0 : fin);
     if (run.t[0] == null) {
       run.clear(); // ยังไม่ถึงระยะแรก = ยกเลิก ไม่บันทึก
     } else {
@@ -338,19 +377,31 @@ class GaugeController extends ChangeNotifier {
     final run = runs[dragSel];
     switch (dragSt) {
       case DragSt.ready:
-        if (kmh >= 3 && !run.hasData) {
+        final pv = _rPrevKmh, pt = _rPrevTs;
+        if (!run.hasData && pv != null && pt != null && pv < dragStartKmh && kmh >= dragStartKmh) {
+          // จังหวะผ่าน 5 km/h อยู่ระหว่างค่าก่อนหน้ากับค่านี้ -> ประมาณเวลาจริงด้วยเส้นตรง
+          final gap = ts.difference(pt).inMicroseconds / 1e6;
+          final f = (kmh - pv) <= 0 ? 1.0 : ((dragStartKmh - pv) / (kmh - pv)).clamp(0.0, 1.0).toDouble();
+          final since = (gap > 0 && gap < 2.0) ? (1 - f) * gap : 0.0; // เวลาตั้งแต่จุดออกตัวถึงค่านี้
           dragSt = DragSt.run;
-          _dDist = 0;
-          _dT = 0;
+          _dT = since;
+          _dDist = (dragStartKmh + kmh) / 2 / 3.6 * since;
           _dTs = ts;
           _dPrev = kmh;
           _dStill = 0;
           run.clear();
           run.maxKmh = kmh;
+          dragMeters = _dDist;
+          dragSecs = _dT;
+          // ค่า GPS มาถึงแอพช้ากว่าเวลาจริงของจุดนั้นเล็กน้อย -> ชดเชยให้นาฬิกาเริ่มตรงเวลา (จำกัดไม่เกิน 1 วินาที กันนาฬิกาเครื่อง/GPS ไม่ตรงกัน)
+          final lag = DateTime.now().difference(ts).inMicroseconds / 1e6;
+          _clockStart(since + ((lag > 0 && lag < 1.0) ? lag : 0.0));
         }
+        _rPrevKmh = kmh;
+        _rPrevTs = ts;
         break;
       case DragSt.run:
-        final dt = ts.difference(_dTs ?? ts).inMilliseconds / 1000.0;
+        final dt = ts.difference(_dTs ?? ts).inMicroseconds / 1e6;
         if (dt <= 0) break;
         final d = (_dPrev / 3.6 + kmh / 3.6) / 2 * dt;
         final d0 = _dDist, t0 = _dT;
@@ -377,7 +428,11 @@ class GaugeController extends ChangeNotifier {
         }
         break;
       case DragSt.done:
-        if (kmh < 2) dragSt = DragSt.ready; // หยุดนิ่งแล้ว พร้อมรอบถัดไป
+        if (kmh < 2) {
+          dragSt = DragSt.ready; // หยุดนิ่งแล้ว พร้อมรอบถัดไป
+          _rPrevKmh = kmh;
+          _rPrevTs = ts;
+        }
         break;
     }
   }
@@ -463,6 +518,7 @@ class GaugeController extends ChangeNotifier {
             )
           : const LocationSettings(accuracy: LocationAccuracy.best, distanceFilter: 0);
       _gpsSub = Geolocator.getPositionStream(locationSettings: ls).listen((p) {
+        if (demo) return; // DEMO ใช้ GPS จำลอง (ไม่ให้ GPS จริงที่จอดนิ่งมาทับ)
         gpsOk = true;
         _gpsLastMs = DateTime.now().millisecondsSinceEpoch;
         gpsSpeed = math.max(0.0, p.speed * 3.6);
@@ -481,6 +537,10 @@ class GaugeController extends ChangeNotifier {
       _gpsWatch = Timer.periodic(const Duration(seconds: 1), (_) {
         if (gpsOk && DateTime.now().millisecondsSinceEpoch - _gpsLastMs > 4000) {
           gpsOk = false;
+          if (dragSt == DragSt.run) {
+            _dragFinish(); // สัญญาณ GPS หายกลางรอบ: หยุดนาฬิกา เก็บช่วงที่วัดได้
+          }
+          _rPrevKmh = null; // ต้องได้ค่าต่ำกว่า 5 km/h ใหม่ก่อนออกตัวรอบถัดไป
           notifyListeners();
         }
       });
@@ -594,6 +654,7 @@ class GaugeController extends ChangeNotifier {
       await data.setNotifyValue(true);
       await _dataSub?.cancel();
       _dataSub = data.onValueReceived.listen((v) {
+        if (demo) return; // DEMO เปิดอยู่: ไม่เอาค่าจากบอร์ดมาทับ
         final p = Telemetry.parse(v);
         if (p != null) {
           t = p;
@@ -690,27 +751,127 @@ class GaugeController extends ChangeNotifier {
     }
   }
 
-  // ----- DEMO -----
+  // ----- DEMO: จำลองการขี่ครบทุกค่า -----
+  // ECU 14 ค่า (RPM, SPEED, W.TEMP, IAT, EOT, TPS, MAP, BATT, AFR, IGN, INJ, O2, STFT, LTFT)
+  // + GPS (ความเร็ว, ความแม่นยำ, ดาวเทียม) + DRAG LOG (ออกตัว 5 km/h, นาฬิกา 0.0000, ระยะ 201/402/500/1000 m)
+  // วนรอบละ 48 วินาที: จอดติดเครื่อง 5 s -> ออกตัวเต็มคันเร่ง 34 s (เกิน 1000 m, สูงสุด ~148 km/h) -> เบรกจนหยุด 9 s
+  // LOG DRAG จริงถูกพักไว้ระหว่าง DEMO (ไม่บันทึกทับ) และคืนค่าเดิมเมื่อปิด DEMO
+  static const double _demoCycle = 48.0;
+  List<dynamic>? _demoRunsBak;
+  int _demoSelBak = 0;
+
   void toggleDemo() {
     demo = !demo;
     _demoTimer?.cancel();
     if (demo) {
+      _demoRunsBak = runs.map((r) => r.toJson()).toList();
+      _demoSelBak = dragSel;
+      for (final r in runs) {
+        r.clear();
+      }
+      dragSel = 0;
+      _dragResetLive();
+      final rnd = math.Random();
       final sw = Stopwatch()..start();
-      _demoTimer = Timer.periodic(const Duration(milliseconds: 60), (_) {
-        final s = sw.elapsedMilliseconds / 1000.0;
-        final k = (math.sin(s * 0.6) + 1) / 2;
+      const vmax = 150 / 3.6, tau = 8.0; // m/s ; ค่าคงที่เวลาเร่ง (ออกตัวแบบรถสายพาน)
+      double last = 0, v = 0, ect = 72, eot = 70, stft = 1.0;
+      int tick = 0;
+      _demoTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
+        final now = sw.elapsedMicroseconds / 1e6;
+        final dt = (now - last).clamp(0.0, 0.2).toDouble();
+        last = now;
+        final ph = now % _demoCycle;
+        final wob = math.sin(now * 7.3); // สั่นเล็กน้อยให้ดูเหมือนจริง
+        double tps, rpm;
+        bool decel = false;
+        if (ph < 5) {
+          // จอดติดเครื่อง (เดินเบา)
+          v = math.max(0.0, v - 6 * dt);
+          tps = 0;
+          rpm = 1550 + 40 * wob;
+          // LOG เต็ม 3 RUN แล้ว -> ล้างก่อนออกตัวรอบใหม่ (เฉพาะ DEMO)
+          if (ph > 4.5 && dragSt != DragSt.run && runs.every((r) => r.hasData)) {
+            for (final r in runs) {
+              r.clear();
+            }
+            dragSel = 0;
+          }
+        } else if (ph < 39) {
+          // ออกตัวเต็มคันเร่ง: dv/dt = (vmax - v) / tau
+          v += (vmax - v) / tau * dt;
+          tps = math.max(0.0, 100 - 12 * v / vmax);
+          rpm = 6800 + 2700 * v / vmax + 60 * wob;
+        } else {
+          // เบรก ~4.8 m/s²
+          v = math.max(0.0, v - 4.8 * dt);
+          tps = 0;
+          decel = v > 1;
+          rpm = decel ? 2300 + 3600 * v / vmax : 1600 + 40 * wob;
+        }
+        final spd = v * 3.6;
+        final load = tps / 100;
+        // อุณหภูมิค่อยๆ อุ่นเครื่องขึ้นจนคงที่
+        ect += (90 + 2 * load - ect) * dt / 25;
+        eot += (96 + 4 * load - eot) * dt / 35;
+        final double afr = decel
+            ? math.min(19.0, 17.2 + 1.8 * v / vmax)
+            : (load > 0.5 ? 12.9 + 0.25 * wob : 14.4 + 0.35 * math.sin(now * 2.1));
+        final double o2v = afr < 14.7 ? (0.82 - (afr - 12.5) * 0.04 + 0.02 * wob) : (0.14 + 0.04 * rnd.nextDouble());
+        stft += ((afr < 14.7 ? 0.96 : 1.04) - stft) * dt * 0.8 + (rnd.nextDouble() - 0.5) * 0.004;
+        stft = stft.clamp(0.9, 1.1).toDouble();
+        final double inj = decel ? 0.55 : (load == 0 ? 1.45 + 0.05 * wob : 1.4 + 5.2 * load * (0.6 + 0.4 * rpm / 9500));
+        final double ign = decel ? 30.0 : (load == 0 ? 12 + wob : (18 + 14 * ((rpm - 6000) / 3500).clamp(0.0, 1.0)).toDouble());
+        final double map = decel ? 22 + 2 * wob : 30 + 68 * load + 1.5 * wob;
         t = Telemetry(
-          fresh: true, state: 1, proto: 1,
-          rpm: 950 + 10200 * k, speed: 120 * k, ect: 82 + 6 * k, iat: 34,
-          tps: 5 + 80 * k, batt: 13.8, afr: 13.2 + 2 * (1 - k), ign: 12 + 18 * k,
+          fresh: true, state: 1, proto: 1, bike: t.bike, img: 0,
+          rpm: rpm, speed: spd, ect: ect, iat: 33 + 3 * (1 - v / vmax), eot: eot,
+          tps: tps, map: map, batt: rpm < 2000 ? 13.4 + 0.03 * wob : 14.1 + 0.05 * wob,
+          afr: afr, ign: ign, inj: inj, o2v: o2v, stft: stft, ltft: 0.984 + 0.004 * math.sin(now * 0.05),
         );
+        // GPS จำลอง 10 Hz (ทุก 2 รอบ) -> ป้อนหน้า DRAG LOG / GRAPH / ความเร็ว GPS
+        if (++tick % 2 == 0) {
+          gpsOk = true;
+          _gpsLastMs = DateTime.now().millisecondsSinceEpoch;
+          gpsSpeed = spd < 0.5 ? 0.0 : math.max(0.0, spd + (rnd.nextDouble() - 0.5) * 0.6);
+          gpsAccM = 3.0 + rnd.nextDouble() * 1.5;
+          spdAccKmh = 0.5 + rnd.nextDouble() * 0.4;
+          satTotal = 26;
+          satUsed = 17 + (2 * math.sin(now / 20)).round();
+          _dragUpdate(gpsSpeed!, DateTime.now());
+        }
         _track();
         notifyListeners();
       });
     } else {
       t = Telemetry();
+      // คืนสถานะ GPS ให้ GPS จริงอัปเดตต่อ และคืน LOG DRAG เดิม
+      gpsOk = false;
+      gpsSpeed = null;
+      gpsAccM = null;
+      spdAccKmh = null;
+      satUsed = null;
+      satTotal = null;
+      final bak = _demoRunsBak;
+      if (bak != null) {
+        for (int i = 0; i < runs.length && i < bak.length; i++) {
+          runs[i] = DragRun.fromJson(bak[i]);
+        }
+        dragSel = _demoSelBak;
+      }
+      _demoRunsBak = null;
+      _dragResetLive();
     }
     notifyListeners();
+  }
+
+  /// ล้างสถานะรอบที่กำลังวิ่ง/นาฬิกา (ไม่แตะ LOG ที่บันทึกแล้ว)
+  void _dragResetLive() {
+    dragSt = DragSt.ready;
+    dragMeters = 0;
+    dragSecs = 0;
+    _rPrevKmh = null;
+    _rPrevTs = null;
+    _clockStop(0);
   }
 
   @override
@@ -723,6 +884,8 @@ class GaugeController extends ChangeNotifier {
     _gpsSub?.cancel();
     _gpsWatch?.cancel();
     _gnssSub?.cancel();
+    _dTick?.cancel();
+    dragClock.dispose();
     _gTimer?.cancel();
     super.dispose();
   }
@@ -1126,7 +1289,7 @@ class _GaugePageState extends State<GaugePage> {
             ]),
           ),
         );
-    String tm(double? v) => v == null ? '--' : '${v.toStringAsFixed(2)} s';
+    String tm(double? v) => v == null ? '--' : '${v.toStringAsFixed(4)} s';
     String kh(double? v) => v == null ? '--' : '${v.round()} km/h';
     return Column(children: [
       row(cell('DIST', head: true, right: false), cell('TIME', head: true), cell('SPEED', head: true)),
@@ -1165,15 +1328,27 @@ class _GaugePageState extends State<GaugePage> {
       ]),
       Expanded(
         child: Center(
-          child: running
+          child: running || (c.dragSt == DragSt.done && c.dragClock.value > 0)
               ? Column(mainAxisSize: MainAxisSize.min, children: [
-                  Text('${c.dragSecs.toStringAsFixed(2)} s',
-                      style: TextStyle(fontFamily: kFont, fontSize: 26, color: Colors.white, shadows: [Shadow(color: th.c, blurRadius: 10)])),
+                  // นาฬิกาวิ่งจริง 0.0000 (อัปเดต ~60 ครั้ง/วินาที เฉพาะตัวเลขนี้) | จบรอบ = ค้างเวลาสุดท้าย
+                  ValueListenableBuilder<double>(
+                    valueListenable: c.dragClock,
+                    builder: (_, v, __) => FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: _monoNum('${v.toStringAsFixed(4)} s',
+                          TextStyle(fontFamily: kFont, fontSize: 26, color: Colors.white, shadows: [Shadow(color: th.c, blurRadius: 10)])),
+                    ),
+                  ),
                   const SizedBox(height: 4),
-                  Text('${c.dragMeters.round()} m', style: const TextStyle(fontSize: 14, color: Colors.white70)),
+                  Text(running ? '${c.dragMeters.round()} m' : 'DONE · ${c.dragMeters.round()} m',
+                      style: const TextStyle(fontSize: 14, color: Colors.white70)),
                 ])
               : Text(
-                  c.dragFull ? 'RUN ${c.dragSel + 1} มีข้อมูลแล้ว\nเลือก RUN อื่น หรือกด RESET LOG' : 'รอออกตัว… (ความเร็ว > 3 km/h)',
+                  c.dragFull
+                      ? 'RUN ${c.dragSel + 1} มีข้อมูลแล้ว\nเลือก RUN อื่น หรือกด RESET LOG'
+                      : (c.dragArmed
+                          ? 'รอออกตัว… (เริ่มจับเวลาเมื่อเกิน ${GaugeController.dragStartKmh.round()} km/h)'
+                          : 'ชะลอให้ต่ำกว่า ${GaugeController.dragStartKmh.round()} km/h\nเพื่อเตรียมออกตัว'),
                   textAlign: TextAlign.center,
                   style: const TextStyle(fontSize: 12, color: Colors.white54)),
         ),
@@ -1193,6 +1368,16 @@ class _GaugePageState extends State<GaugePage> {
           child: const Text('RESET LOG', style: TextStyle(fontFamily: kFont, fontSize: 10, color: kBad)),
         ),
       ),
+    ]);
+  }
+
+  /// ตัวเลขกว้างคงที่ทีละตัว: ฟอนต์ Ethnocentric ตัวเลขกว้างไม่เท่ากัน ("1" แคบ) -> ถ้าไม่ล็อกความกว้าง นาฬิกาจะสั่นซ้ายขวาตอนวิ่ง
+  Widget _monoNum(String s, TextStyle st) {
+    final fs = st.fontSize ?? 14;
+    double w(String ch) => ch == '.' ? fs * 0.42 : (ch == ' ' ? fs * 0.3 : (RegExp(r'[0-9]').hasMatch(ch) ? fs * 1.0 : fs * 0.9));
+    return Row(mainAxisSize: MainAxisSize.min, children: [
+      for (final ch in s.split(''))
+        SizedBox(width: w(ch), child: Text(ch, textAlign: TextAlign.center, softWrap: false, overflow: TextOverflow.visible, style: st)),
     ]);
   }
 
