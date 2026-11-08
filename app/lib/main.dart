@@ -1024,6 +1024,7 @@ class GaugeController extends ChangeNotifier {
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Cfg.i.load();
+  await EcuDb.load(); // ฐานข้อมูล ID กล่อง -> รุ่น / offset (assets/ecm_database.json)
   SystemChrome.setPreferredOrientations([DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]);
   SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
   runApp(const MfbProApp());
@@ -3357,24 +3358,78 @@ class OrigPack {
   }
 }
 
-// ID กล่อง (5 ไบต์) -> ชื่อรุ่น  (คีย์เป็นเลขฐาน 16 เว้นวรรค ตัวใหญ่) ; เติมรุ่นอื่นเมื่อได้ ID จริง
+// ID กล่อง (5 ไบต์) -> ชื่อรุ่น  (คีย์เป็นเลขฐาน 16 เว้นวรรค ตัวใหญ่)
+// สำรองไว้เผื่อโหลดฐานข้อมูลไม่สำเร็จ ; รายชื่อรุ่นหลัก 265 รุ่นมาจาก assets/ecm_database.json (ดู EcuDb)
 const kEcuModels = <String, String>{
-  '01 01 88 0D 01': 'Wave110i (2013–2017)',
+  '01 01 88 0D 01': 'Wave 110i (2019-2020)',
 };
 String ecmHex(List<int>? e) => e == null ? '' : e.map((x) => x.toRadixString(16).padLeft(2, '0').toUpperCase()).join(' ');
 String? ecuModelName(List<int>? e) {
   if (e == null) return null;
-  final m = kEcuModels[ecmHex(e)];
-  if (m != null) return m;
+  final id = ecmHex(e);
+  final m = EcuDb.model[id] ?? kEcuModels[id]; // ฐานข้อมูลก่อน แล้วค่อย fallback
+  if (m != null && m.isNotEmpty) return m;
   for (final o in kOriginals) {
     if (o.matches(e) && o.model.isNotEmpty) return o.model;
   }
   return null;
 }
 
+// ฐานข้อมูล ECM จาก assets/ecm_database.json (ที่มา: repo josave-tuner) — ID -> รุ่น / offset / ชนิดกล่อง
+class EcuDb {
+  static final Map<String, String> model = {}; // "01 01 88 0D 01" -> ชื่อรุ่น
+  static final Map<String, (int, int)> profile = {}; // ID -> (start_offset, checksum_offset)
+  static final Map<String, String> type = {}; // ID -> 'keihin' / 'shindengen'
+  static final Map<String, String> part = {}; // ID -> พาร์ทโค้ด
+  static bool loaded = false;
+
+  static String _fmtId(String raw) {
+    final h = raw.replaceAll(' ', '').replaceAll('0x', '').toUpperCase();
+    final b = <String>[];
+    for (int i = 0; i + 2 <= h.length; i += 2) {
+      b.add(h.substring(i, i + 2));
+    }
+    return b.join(' ');
+  }
+
+  static int? _hx(dynamic v) {
+    if (v == null) return null;
+    var s = v.toString().trim();
+    if (s.isEmpty) return null;
+    s = s.toLowerCase().replaceFirst('0x', '');
+    return int.tryParse(s, radix: 16);
+  }
+
+  static Future<void> load() async {
+    if (loaded) return;
+    try {
+      final raw = await rootBundle.loadString('assets/ecm_database.json');
+      final d = json.decode(raw) as Map<String, dynamic>;
+      for (final cat in d.keys) {
+        final list = d[cat];
+        if (list is! List) continue;
+        for (final e in list) {
+          if (e is! Map) continue;
+          final id = _fmtId((e['ecm_id'] ?? '').toString());
+          if (id.isEmpty) continue;
+          model[id] = (e['model_name'] ?? '').toString();
+          type[id] = cat.toString();
+          part[id] = (e['part_code'] ?? '').toString();
+          final so = _hx(e['start_offset']);
+          final co = _hx(e['checksum_offset']);
+          if (so != null && co != null) profile[id] = (so, co);
+        }
+      }
+      loaded = true;
+    } catch (_) {
+      // โหลดไม่สำเร็จ -> ใช้ kEcuModels สำรองแทน
+    }
+  }
+}
+
 const kOriginals = <OrigPack>[
   OrigPack('K03-H01', 'assets/original/K03-H01.bin', 'assets/original/K03-H01.xdf',
-      model: 'Wave110i (2013–2017)', ecuId: [0x01, 0x01, 0x88, 0x0D, 0x01], binKb: 64, xdfKb: 17),
+      model: 'Wave 110i (2019-2020)', ecuId: [0x01, 0x01, 0x88, 0x0D, 0x01], binKb: 64, xdfKb: 17),
 ];
 
 /// เลือกไฟล์จากเครื่องเฉพาะนามสกุลที่กำหนด (bin / xdf) ; คืน (ชื่อไฟล์, ไบต์) หรือ null
