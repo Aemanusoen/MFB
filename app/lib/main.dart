@@ -2680,12 +2680,28 @@ class XdfDef {
 
   static XdfDef parse(Uint8List bytes) {
     String txt;
-    try {
-      txt = utf8.decode(bytes);
-    } catch (_) {
-      txt = latin1.decode(bytes);
+    if (bytes.length >= 2 && ((bytes[0] == 0xFF && bytes[1] == 0xFE) || (bytes[0] == 0xFE && bytes[1] == 0xFF))) {
+      // UTF-16 (มี BOM)
+      final le = bytes[0] == 0xFF;
+      final u = <int>[];
+      for (int i = 2; i + 1 < bytes.length; i += 2) {
+        u.add(le ? bytes[i] | (bytes[i + 1] << 8) : (bytes[i] << 8) | bytes[i + 1]);
+      }
+      txt = String.fromCharCodes(u);
+    } else {
+      try {
+        txt = utf8.decode(bytes);
+      } catch (_) {
+        txt = latin1.decode(bytes);
+      }
     }
     if (txt.startsWith('﻿')) txt = txt.substring(1);
+    // มีข้อมูลอื่นนำหน้า/ต่อท้าย -> ตัดเอาเฉพาะช่วง <XDFFORMAT ... </XDFFORMAT>
+    final xs = txt.indexOf('<XDFFORMAT');
+    if (xs > 0) {
+      final xe = txt.lastIndexOf('</XDFFORMAT>');
+      txt = xe > xs ? txt.substring(xs, xe + 12) : txt.substring(xs);
+    }
     if (!txt.trimLeft().startsWith('<')) {
       throw XdfError('XDF นี้ถูกเข้ารหัสโดยผู้ทำไฟล์ (เปิดได้เฉพาะใน TunerPro) — ขอไฟล์แบบที่ไม่เข้ารหัสจากผู้ขาย');
     }
@@ -3287,21 +3303,28 @@ const kOriginals = <OrigPack>[
 ];
 
 /// เลือกไฟล์จากเครื่องเฉพาะนามสกุลที่กำหนด (bin / xdf) ; คืน (ชื่อไฟล์, ไบต์) หรือ null
-Future<(String, Uint8List)?> pickFileExt(String ext, void Function(String) err) async {
+/// เลือกไฟล์จากมือถือ: เปิดตัวเลือกแบบ "ทุกไฟล์" เสมอ (Android บางเครื่องไม่รู้จัก .xdf/.bin แล้วแสดงไฟล์เป็นสีเทาเลือกไม่ได้)
+/// anyName = true: ไม่ตรวจนามสกุล (ใช้กับ XDF — ตรวจจากเนื้อไฟล์แทน)
+Future<(String, Uint8List)?> pickFileExt(String ext, void Function(String) err, {bool anyName = false}) async {
   FilePickerResult? r;
   try {
-    r = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: [ext], withData: true);
-  } catch (_) {
-    // บางเครื่องไม่รู้จักชนิดไฟล์นี้ -> เปิดตัวเลือกไฟล์ทั้งหมดแล้วตรวจนามสกุลเอง
     r = await FilePicker.platform.pickFiles(type: FileType.any, withData: true);
+  } catch (e) {
+    err('เปิดตัวเลือกไฟล์ไม่ได้: $e');
+    return null;
   }
   if (r == null || r.files.isEmpty) return null;
   final f = r.files.single;
-  if (!f.name.toLowerCase().endsWith('.${ext.toLowerCase()}')) {
+  if (!anyName && !f.name.toLowerCase().endsWith('.${ext.toLowerCase()}')) {
     err('เลือกได้เฉพาะไฟล์ .$ext');
     return null;
   }
-  final b = f.bytes;
+  var b = f.bytes;
+  if ((b == null || b.isEmpty) && f.path != null) {
+    try {
+      b = await io.File(f.path!).readAsBytes();
+    } catch (_) {}
+  }
   if (b == null || b.isEmpty) {
     err('อ่านไฟล์ไม่ได้');
     return null;
@@ -3852,7 +3875,7 @@ class _TunePageState extends State<TunePage> {
   Future<void> _openXdf() async {
     if (_hasEdits && !await _confirm('เปิด XDF ใหม่', 'ประวัติย้อนกลับจะถูกล้าง (ค่าที่แก้ใน BIN ยังอยู่)', ok: 'เปิดไฟล์ใหม่')) return;
     try {
-      final f = await pickFileExt('xdf', _snack);
+      final f = await pickFileExt('xdf', _snack, anyName: true);   // ไฟล์ XDF ทุกชื่อ/นามสกุล — ตรวจจากเนื้อไฟล์
       if (f == null) return;
       final d = XdfDef.parse(f.$2);
       s.loadXdf(f.$1, d);
@@ -3977,17 +4000,34 @@ class _TunePageState extends State<TunePage> {
     for (final x in s.bin!) {
       sum8 = (sum8 + x) & 0xFF;
     }
+    final nameKey = GlobalKey();
     final act = await showDialog<int>(
       context: context,
-      builder: (dctx) => AlertDialog(
+      builder: (dctx) {
+        // แป้นพิมพ์ขึ้น (จอแนวนอนเหลือที่น้อย): ซ่อนหัว/รายละเอียด เหลือแถวเดียว = ช่องชื่อ + ปุ่ม ให้เห็นชื่อที่กำลังแก้
+        final kb = MediaQuery.of(dctx).viewInsets.bottom > 0;
+        Widget acts(bool small) => Row(mainAxisSize: MainAxisSize.min, children: [
+              TextButton(onPressed: () => Navigator.of(dctx).pop(0), child: const Text('ยกเลิก')),
+              TextButton(onPressed: () => Navigator.of(dctx).pop(2), child: Text(small ? 'ส่งออก…' : 'ส่งออกไฟล์…')),
+              TextButton(onPressed: () => Navigator.of(dctx).pop(1), child: Text(small ? 'บันทึก' : 'บันทึกเข้าคลัง', style: TextStyle(color: th.c, fontWeight: FontWeight.bold))),
+            ]);
+        return AlertDialog(
         backgroundColor: const Color(0xFF14141A),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: th.c, width: 1.2)),
-        title: Text('บันทึกเข้าคลังไฟล์', style: TextStyle(fontSize: 16, color: th.c)),
+        insetPadding: EdgeInsets.symmetric(horizontal: 40, vertical: kb ? 4 : 24),
+        titlePadding: kb ? EdgeInsets.zero : const EdgeInsets.fromLTRB(24, 20, 24, 0),
+        contentPadding: kb ? const EdgeInsets.fromLTRB(16, 6, 8, 6) : const EdgeInsets.fromLTRB(24, 16, 24, 8),
+        actionsPadding: kb ? EdgeInsets.zero : null,
+        title: kb ? const SizedBox.shrink() : Text('บันทึกเข้าคลังไฟล์', style: TextStyle(fontSize: 16, color: th.c)),
         content: SizedBox(
           width: 560,
           child: SingleChildScrollView(
             child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-              TextField(controller: tc, decoration: const InputDecoration(labelText: 'ชื่อไฟล์ (ตั้งเองได้)', isDense: true)),
+              Row(children: [
+                Expanded(child: TextField(key: nameKey, controller: tc, decoration: const InputDecoration(labelText: 'ชื่อไฟล์ (ตั้งเองได้)', isDense: true))),
+                if (kb) acts(true),
+              ]),
+              if (!kb) ...[
               const SizedBox(height: 8),
               Text('ต้นฉบับ: ${s.binName} (ไม่ถูกเขียนทับ)', style: const TextStyle(fontSize: 12.5, color: Colors.white70)),
               Text(
@@ -4003,15 +4043,13 @@ class _TunePageState extends State<TunePage> {
               else
                 box(kBad, '⚠ รหัสล็อคกล่องถูกเปลี่ยน',
                     '${locks.map((l) => '${l.$1.title}: ${l.$2} → ${l.$3}').join('\n')}\nจดรหัสใหม่ไว้ ถ้าจำไม่ได้อาจอ่าน/แฟลชกล่องไม่ได้อีก'),
+              ],
             ]),
           ),
         ),
-        actions: [
-          TextButton(onPressed: () => Navigator.of(dctx).pop(0), child: const Text('ยกเลิก')),
-          TextButton(onPressed: () => Navigator.of(dctx).pop(2), child: const Text('ส่งออกไฟล์…')),
-          TextButton(onPressed: () => Navigator.of(dctx).pop(1), child: Text('บันทึกเข้าคลัง', style: TextStyle(color: th.c, fontWeight: FontWeight.bold))),
-        ],
-      ),
+        actions: [if (!kb) acts(false)],
+      );
+      },
     );
     final name = BinLib.clean(tc.text);
     tc.dispose();
@@ -5114,7 +5152,7 @@ class _Proj3 {
 
   (Offset, double) pt(double r, double c, double val) {
     final x = nc > 1 ? c / (nc - 1) * 2 - 1 : 0.0;
-    final y = nr > 1 ? r / (nr - 1) * 2 - 1 : 0.0;
+    final y = nr > 1 ? 1 - r / (nr - 1) * 2 : 0.0; // กลับด้านแกนแถว (RPM): ค่าต่ำอยู่ทางขวา ค่าสูงอยู่ทางซ้าย
     final z = ((val - lo) / span - 0.5) * zh;
     final xr = x * cyw - y * syw, yr = x * syw + y * cyw;
     final depth = yr * cp + z * sp;
@@ -5664,6 +5702,7 @@ class _FlashPageState extends State<FlashPage> {
   GaugeController get c => widget.c;
   BinEntry? sel;
   Uint8List? data;
+  String? extName; // ไฟล์ที่เลือกจากมือถือ (ไม่ได้เก็บเข้าคลัง) — null = ใช้ไฟล์จากคลัง
   double? up; // ความคืบหน้าส่งไฟล์ไปเกจ
   bool working = false;
   String? msg;
@@ -5702,6 +5741,7 @@ class _FlashPageState extends State<FlashPage> {
       setState(() {
         sel = e;
         data = b;
+        extName = null;
         msg = null;
       });
     } catch (err) {
@@ -5709,15 +5749,19 @@ class _FlashPageState extends State<FlashPage> {
     }
   }
 
-  Future<void> _import() async {
+  /// เลือกไฟล์ .bin จากมือถือมาแฟลชได้เลย (ไม่เก็บเข้าคลังไฟล์ของแอพ)
+  Future<void> _pickPhone() async {
     try {
-      final f = await pickFileExt('bin', _snack);   // เลือกได้เฉพาะ .bin
+      final f = await pickFileExt('bin', _snack);
       if (f == null || !mounted) return;
-      final dot = f.$1.lastIndexOf('.');
-      final e = await saveToLibrary(context, f.$2, dot > 0 ? f.$1.substring(0, dot) : f.$1);
-      if (e != null) await _select(e);
+      setState(() {
+        sel = null;
+        data = f.$2;
+        extName = f.$1;
+        msg = null;
+      });
     } catch (err) {
-      _snack('นำเข้าไม่สำเร็จ: $err');
+      _snack('เปิดไฟล์ไม่สำเร็จ: $err');
     }
   }
 
@@ -5753,9 +5797,10 @@ class _FlashPageState extends State<FlashPage> {
 
   // ----- ส่งไฟล์ไปเกจ (เริ่มแฟลชด้วยปุ่ม FLASH ที่เกจ) -----
   Future<void> _send() async {
-    final e = sel, d = data;
+    final d = data;
     final f = c.t.fl;
-    if (e == null || d == null || f == null) return;
+    final nm = extName ?? (sel != null ? '${sel!.name}.bin' : null);
+    if (nm == null || d == null || f == null) return;
     if (!kFlashProfiles.containsKey(d.length)) return;
     setState(() {
       working = true;
@@ -5765,7 +5810,7 @@ class _FlashPageState extends State<FlashPage> {
     await c.clearFlash();
     final err = await c.sendBin(d, (v) {
       if (mounted) setState(() => up = v);
-    }, name: '${e.name}.bin');
+    }, name: nm);
     if (!mounted) return;
     setState(() {
       working = false;
@@ -5858,15 +5903,36 @@ class _FlashPageState extends State<FlashPage> {
   Widget _libPanel(AppTheme th) {
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       Row(children: [
-        Text('คลังไฟล์ BIN', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: th.c2)),
+        Text('คลังไฟล์ที่จูนไว้', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: th.c2)),
         const Spacer(),
-        _btn(th, 'นำเข้า', _import, ic: Icons.file_open),
+        _btn(th, 'เลือกจากมือถือ', working || (c.t.fl?.busy ?? false) ? null : _pickPhone, ic: Icons.phone_android),
       ]),
+      if (extName != null)
+        Container(
+          margin: const EdgeInsets.only(top: 6),
+          padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
+          decoration: BoxDecoration(
+            color: th.c.withOpacity(0.2),
+            border: Border.all(color: th.c, width: 1.5),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Row(children: [
+            Icon(Icons.phone_android, size: 20, color: th.c2),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(extName!, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
+                Text('${((data?.length ?? 0) / 1024).toStringAsFixed(1)} KB · จากมือถือ (ไม่ได้เก็บเข้าคลัง)',
+                    style: const TextStyle(fontSize: 10.5, color: Colors.white54)),
+              ]),
+            ),
+          ]),
+        ),
       const SizedBox(height: 8),
       Expanded(
         child: lib.items.isEmpty
             ? const Center(
-                child: Text('คลังยังว่าง\nบันทึกจากหน้า TUNE💻 (ไฟล์ > บันทึกเข้าคลังไฟล์) หรือกด "นำเข้า"',
+                child: Text('คลังยังว่าง\nบันทึกจากหน้า TUNE💻 (ไฟล์ > บันทึกเข้าคลังไฟล์)\nหรือกด "เลือกจากมือถือ" เพื่อแฟลชไฟล์ในเครื่องโดยตรง',
                     textAlign: TextAlign.center, style: TextStyle(color: Colors.white54, fontSize: 12.5)))
             : ListView(children: [
                 for (final e in lib.items)
@@ -5995,7 +6061,7 @@ class _FlashPageState extends State<FlashPage> {
           if (f.batt != null) _row('แบต (ล่าสุด)', '${f.batt!.toStringAsFixed(1)} V', col: f.batt! < 12.0 ? kAmber : Colors.white),
         ],
         const Divider(color: Colors.white12, height: 16),
-        Text(sel == null ? 'เลือกไฟล์จากคลังทางซ้าย' : 'ไฟล์: ${sel!.name}',
+        Text(extName != null ? 'ไฟล์: $extName (จากมือถือ)' : (sel == null ? 'เลือกไฟล์จากคลัง หรือจากมือถือ' : 'ไฟล์: ${sel!.name}'),
             maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: th.c2)),
         const SizedBox(height: 6),
         if (d != null) Text(fileTxt, style: TextStyle(fontSize: 12, color: fileCol, height: 1.35)),
