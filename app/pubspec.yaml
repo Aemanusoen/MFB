@@ -35,6 +35,7 @@ flutter:
     - assets/bg.jpg
     - assets/splash.jpg
     - assets/original/
+    - assets/ecm_database.json
   fonts:
     - family: Ethnocentric
       fonts:
