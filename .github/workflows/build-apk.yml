@@ -19,6 +19,15 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      # เก็บ Gradle + ไลบรารีที่โหลดแล้วไว้ใช้ซ้ำ (รอบถัดไปไม่ต้องโหลดจากเน็ตใหม่ = เร็วขึ้น และไม่พังเพราะเซิร์ฟเวอร์ดาวน์โหลดล่ม)
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('app/pubspec.yaml') }}
+          restore-keys: gradle-${{ runner.os }}-
+
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
@@ -32,6 +41,26 @@ jobs:
           flutter create . --platforms=android --project-name mfb_pro --org com.mfbpro
           cp /tmp/pubspec.yaml pubspec.yaml
           cp /tmp/main.dart lib/main.dart
+
+      # โหลด Gradle เองแบบลองซ้ำหลายครั้ง (แก้ error 504 Gateway Time-out ตอนโหลด gradle-x.x.x-all.zip)
+      - name: Pre-download Gradle (retry)
+        run: |
+          P=android/gradle/wrapper/gradle-wrapper.properties
+          URL=$(grep '^distributionUrl' "$P" | cut -d= -f2- | sed 's#\\:#:#g')
+          F=$(basename "$URL")
+          C=$(ls ~/.gradle/wrapper/dists/*/*/"$F" 2>/dev/null | head -1 || true)
+          if [ -n "$C" ]; then
+            echo "ใช้ Gradle จากแคช: $C"; cp "$C" "/tmp/$F"
+          else
+            ok=0
+            for u in "$URL" "https://services.gradle.org/distributions/$F"; do
+              echo "โหลด $u"
+              if curl -fL --retry 8 --retry-delay 20 --retry-all-errors --connect-timeout 30 -o "/tmp/$F" "$u"; then ok=1; break; fi
+            done
+            [ "$ok" = 1 ] || { echo "โหลด Gradle ไม่สำเร็จ (เซิร์ฟเวอร์ยังล่ม) ลอง Re-run อีกครั้งภายหลัง"; exit 1; }
+          fi
+          sed -i "s#^distributionUrl=.*#distributionUrl=file\\:///tmp/$F#" "$P"
+          grep '^distributionUrl' "$P"
 
       - name: Add BLE / GPS permissions + app name
         run: |
@@ -141,8 +170,14 @@ jobs:
             echo "no assets/icon.png - using default icon"
           fi
 
+      # ลอง build ซ้ำสูงสุด 3 ครั้ง (ถ้าโหลดไลบรารีจาก Maven/GitHub ล้มชั่วคราว)
       - name: Build APK
-        run: flutter build apk --release
+        run: |
+          for i in 1 2 3; do
+            flutter build apk --release && exit 0
+            echo "build ล้ม (รอบ $i) รอ 30 วินาทีแล้วลองใหม่"; sleep 30
+          done
+          exit 1
 
       - uses: actions/upload-artifact@v4
         with:
