@@ -272,6 +272,7 @@ class GaugeController extends ChangeNotifier {
   static const EventChannel _gnss = EventChannel('mfb/gnss'); // จำนวนดาวเทียมจริงจาก Android (MainActivity.kt ที่ workflow เติมให้)
   Timer? _demoTimer, _retryTimer, _gpsWatch;
   bool _auto = false;
+  String? gaugeId, gaugeName; // เกจที่เลือกไว้ (ต่อใหม่อัตโนมัติเฉพาะตัวนี้ ไม่ไปต่อเกจคันอื่น)
   int _gpsSentMs = 0, _gpsLastMs = 0;
   bool _logoBusy = false;
 
@@ -632,9 +633,9 @@ class GaugeController extends ChangeNotifier {
   }
 
   // ----- BLE -----
-  Future<void> connect() async {
+  /// ขอสิทธิ์ + เปิดบลูทูธ + โหลดเกจที่เคยเลือก ; true = พร้อมสแกน
+  Future<bool> prepareBle() async {
     if (demo) toggleDemo();
-    _auto = true;
     error = null;
     await [Permission.bluetoothScan, Permission.bluetoothConnect, Permission.locationWhenInUse].request();
     if (await FlutterBluePlus.adapterState.first != BluetoothAdapterState.on) {
@@ -642,26 +643,71 @@ class GaugeController extends ChangeNotifier {
         await FlutterBluePlus.turnOn();
       } catch (_) {}
     }
-    await _scanAndConnect();
+    if (gaugeId == null) {
+      try {
+        final p = await SharedPreferences.getInstance();
+        gaugeId = p.getString('gauge_id');
+        gaugeName = p.getString('gauge_name');
+      } catch (_) {}
+    }
+    return await FlutterBluePlus.adapterState.first == BluetoothAdapterState.on;
   }
 
+  /// สแกนหาเกจทุกตัวให้หน้าต่างเลือก (ผลอยู่ใน FlutterBluePlus.scanResults)
+  Future<void> startPickScan() async {
+    _retryTimer?.cancel();
+    _auto = false;
+    try {
+      await FlutterBluePlus.stopScan();
+    } catch (_) {}
+    try {
+      await FlutterBluePlus.startScan(withServices: [kSvc], timeout: const Duration(seconds: 10));
+    } catch (_) {}
+  }
+
+  Future<void> stopPickScan() async {
+    try {
+      await FlutterBluePlus.stopScan();
+    } catch (_) {}
+  }
+
+  /// ต่อกับเกจที่ผู้ใช้เลือก แล้วจำไว้
+  Future<void> connectTo(BluetoothDevice dev, String name) async {
+    await stopPickScan();
+    gaugeId = dev.remoteId.str;
+    gaugeName = name;
+    try {
+      final p = await SharedPreferences.getInstance();
+      await p.setString('gauge_id', gaugeId!);
+      await p.setString('gauge_name', name);
+    } catch (_) {}
+    _auto = true;
+    error = null;
+    await _open(dev);
+  }
+
+  /// ต่อใหม่อัตโนมัติ (หลุดเอง): หาเฉพาะเกจตัวที่เลือกไว้
   Future<void> _scanAndConnect() async {
-    if (!_auto) return;
+    if (!_auto || gaugeId == null) return;
     link = LinkState.scanning;
     notifyListeners();
     await _scanSub?.cancel();
     final done = Completer<BluetoothDevice?>();
     _scanSub = FlutterBluePlus.scanResults.listen((rs) {
       for (final r in rs) {
-        if (!done.isCompleted) done.complete(r.device);
+        if (r.device.remoteId.str == gaugeId && !done.isCompleted) done.complete(r.device);
       }
     });
-    await FlutterBluePlus.startScan(withServices: [kSvc], timeout: const Duration(seconds: 8));
+    try {
+      await FlutterBluePlus.startScan(withServices: [kSvc], timeout: const Duration(seconds: 8));
+    } catch (_) {}
     final dev = await done.future.timeout(const Duration(seconds: 9), onTimeout: () => null);
-    await FlutterBluePlus.stopScan();
+    try {
+      await FlutterBluePlus.stopScan();
+    } catch (_) {}
     await _scanSub?.cancel();
     if (dev == null) {
-      error = 'ไม่พบ MFB-PRO';
+      error = 'ไม่พบ ${gaugeName ?? 'เกจ'}';
       link = LinkState.idle;
       notifyListeners();
       _scheduleRetry();
@@ -1156,7 +1202,7 @@ class _GaugePageState extends State<GaugePage> {
       LinkState.idle => 'OFFLINE',
       LinkState.scanning => 'SCANNING',
       LinkState.connecting => 'CONNECTING',
-      LinkState.connected => 'CONNECTED',
+      LinkState.connected => c.gaugeName ?? 'CONNECTED',
     };
     final linkCol = c.link == LinkState.connected ? kGreen : (c.link == LinkState.idle ? kBad : kAmber);
 
@@ -1189,7 +1235,7 @@ class _GaugePageState extends State<GaugePage> {
                   ),
                 ),
                 _btn(c.link == LinkState.connected ? 'ตัดการเชื่อมต่อ' : 'เชื่อมต่อ',
-                    () => c.link == LinkState.connected ? c.disconnect() : c.connect(), th),
+                    () => c.link == LinkState.connected ? c.disconnect() : pickGauge(context, c), th),
                 const SizedBox(width: 6),
                 _btn('DEMO', c.toggleDemo, th, active: c.demo),
                 const SizedBox(width: 6),
@@ -3335,6 +3381,531 @@ Future<(String, Uint8List)?> pickFileExt(String ext, void Function(String) err, 
   return (f.name, b);
 }
 
+// ---------- หน้าต่างเลือกเกจ (กด "เชื่อมต่อ") : เกจแต่ละตัวชื่อไม่ซ้ำ MFB-PRO-XXXX ----------
+Future<void> pickGauge(BuildContext context, GaugeController c) async {
+  if (!await c.prepareBle()) {
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('เปิดบลูทูธก่อน แล้วกดเชื่อมต่ออีกครั้ง')));
+    }
+    return;
+  }
+  if (!context.mounted) return;
+  final th = Cfg.i.t;
+  final found = <String, ScanResult>{};
+  bool scanning = true;
+  StreamSubscription? sub, run;
+  void Function(void Function())? setD;
+  Future<void> scan() async {
+    found.clear();
+    scanning = true;
+    setD?.call(() {});
+    await c.startPickScan();
+  }
+
+  sub = FlutterBluePlus.scanResults.listen((rs) {
+    for (final r in rs) {
+      found[r.device.remoteId.str] = r;
+    }
+    setD?.call(() {});
+  });
+  run = FlutterBluePlus.isScanning.listen((v) {
+    scanning = v;
+    setD?.call(() {});
+  });
+  scan();
+  final picked = await showDialog<ScanResult>(
+    context: context,
+    builder: (dctx) => StatefulBuilder(builder: (dctx, sd) {
+      setD = sd;
+      final list = found.values.toList()..sort((a, b) => b.rssi.compareTo(a.rssi));
+      String nm(ScanResult r) {
+        final a = r.advertisementData.advName;
+        return a.isNotEmpty ? a : (r.device.platformName.isNotEmpty ? r.device.platformName : 'MFB-PRO');
+      }
+
+      Widget bars(int rssi) {
+        final lvl = rssi > -55 ? 4 : rssi > -67 ? 3 : rssi > -78 ? 2 : 1;
+        return Row(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.end, children: [
+          for (int k = 0; k < 4; k++)
+            Container(width: 5, height: 6.0 + k * 4, margin: const EdgeInsets.only(right: 2), color: k < lvl ? th.c : Colors.white24),
+        ]);
+      }
+
+      return AlertDialog(
+        backgroundColor: const Color(0xFF14141A),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14), side: BorderSide(color: th.c, width: 1.3)),
+        title: Row(children: [
+          Expanded(child: Text('เลือกเกจที่จะเชื่อมต่อ', style: TextStyle(fontSize: 17, color: th.c, fontWeight: FontWeight.bold))),
+          if (scanning) const Text('กำลังสแกน…', style: TextStyle(fontSize: 12.5, color: kAmber)),
+        ]),
+        content: SizedBox(
+          width: 520,
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(list.isEmpty ? (scanning ? 'กำลังค้นหาเกจ MFB-PRO ใกล้ ๆ …' : 'ไม่พบเกจ — เปิดเกจ และตรวจว่าเปิด MOBILE APP (BLE) = ON')
+                : 'พบ ${list.length} เกจ เรียงจากสัญญาณแรงสุด (ใกล้สุด)',
+                style: const TextStyle(fontSize: 12.5, color: Colors.white60)),
+            const SizedBox(height: 8),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 260),
+              child: ListView(shrinkWrap: true, children: [
+                for (final r in list)
+                  Builder(builder: (_) {
+                    final last = r.device.remoteId.str == c.gaugeId;
+                    return InkWell(
+                      onTap: () => Navigator.of(dctx).pop(r),
+                      borderRadius: BorderRadius.circular(10),
+                      child: Container(
+                        margin: const EdgeInsets.only(bottom: 6),
+                        padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+                        decoration: BoxDecoration(
+                          color: last ? th.c.withOpacity(0.18) : Colors.white.withOpacity(0.04),
+                          border: Border.all(color: last ? th.c : Colors.white24, width: last ? 1.5 : 1),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Row(children: [
+                          Expanded(
+                            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                              Text(nm(r), style: const TextStyle(fontFamily: kFont, fontSize: 13)),
+                              if (last) const Text('เชื่อมต่อล่าสุด', style: TextStyle(fontSize: 11.5, color: kGreen)),
+                            ]),
+                          ),
+                          bars(r.rssi),
+                          const SizedBox(width: 8),
+                          Text('${r.rssi} dBm', style: const TextStyle(fontSize: 11.5, color: Colors.white54)),
+                          Icon(Icons.chevron_right, color: last ? th.c : Colors.white38),
+                        ]),
+                      ),
+                    );
+                  }),
+              ]),
+            ),
+          ]),
+        ),
+        actions: [
+          TextButton(onPressed: scanning ? null : scan, child: const Text('สแกนใหม่')),
+          TextButton(onPressed: () => Navigator.of(dctx).pop(), child: const Text('ยกเลิก')),
+        ],
+      );
+    }),
+  );
+  setD = null;
+  await sub?.cancel();
+  await run?.cancel();
+  if (picked == null) {
+    await c.stopPickScan();
+    return;
+  }
+  final a = picked.advertisementData.advName;
+  await c.connectTo(picked.device, a.isNotEmpty ? a : picked.device.platformName);
+}
+
+class _TriPainter extends CustomPainter {
+  final Color c;
+  _TriPainter(this.c);
+  @override
+  void paint(Canvas canvas, Size z) =>
+      canvas.drawPath(Path()..moveTo(0, z.height)..lineTo(z.width / 2, 0)..lineTo(z.width, z.height)..close(), Paint()..color = c);
+  @override
+  bool shouldRepaint(_TriPainter o) => o.c != c;
+}
+
+// ---------- AFR LOG: เก็บค่า AFR สดลงตาราง RPM × TPS (แกนเดียวกับตารางน้ำมัน) ----------
+// ดูอย่างเดียว ไม่เขียนลง BIN | เก็บเป็นค่าเฉลี่ยสะสมต่อช่อง + จำนวนครั้ง | บันทึกลงเครื่องทุก ~10 วินาที (Documents/afr_log.json)
+class AfrLog extends ChangeNotifier {
+  static final AfrLog i = AfrLog._();
+  AfrLog._();
+
+  List<double> rpm = const [], tps = const []; // แกนแถว (RPM) / แกนคอลัมน์ (TPS)
+  String src = ''; // ตารางที่ใช้แกน
+  List<List<double>> sum = const [];
+  List<List<int>> cnt = const [];
+  (int, int)? liveCell;
+  bool rec = true; // บันทึกอยู่
+  GaugeController? _c;
+  Telemetry? _lastT;
+  int _lastMs = 0, _saveMs = 0;
+  bool _dirty = false, _loaded = false;
+
+  int get rows => rpm.length;
+  int get cols => tps.length;
+  bool get ready => rows > 1 && cols > 1;
+  int get filled {
+    int n = 0;
+    for (final r in cnt) {
+      for (final k in r) {
+        if (k > 0) n++;
+      }
+    }
+    return n;
+  }
+
+  double? at(int r, int c) => cnt[r][c] > 0 ? sum[r][c] / cnt[r][c] : null;
+
+  void attach(GaugeController c) {
+    if (identical(_c, c)) return;
+    _c?.removeListener(_feed);
+    _c = c;
+    c.addListener(_feed);
+  }
+
+  /// ตั้งแกนจาก XDF ที่เปิดอยู่: ตาราง 2D ที่มีแกน RPM + TPS (เลือก 29×25 / ชื่อ "น้ำมัน" ก่อน)
+  XdfDef? _ref;
+  void syncAxes(TuneSession s) {
+    final d = s.xdf;
+    if (d == null || s.bin == null) return;
+    if (identical(d, _ref) && ready) return; // XDF เดิม: แกนเดิม
+    XdfTable? best;
+    bool rpmOnRows = true;
+    int bestScore = -1;
+    for (final t in d.tables) {
+      if (!t.valid || !t.is2D) continue;
+      final ky = _axisKind(s.axisNums(t, false)), kx = _axisKind(s.axisNums(t, true));
+      final onRows = ky == 1 && kx == 2, onCols = ky == 2 && kx == 1;
+      if (!onRows && !onCols) continue;
+      int sc = 1;
+      if ((onRows && t.rows == 29 && t.cols == 25) || (onCols && t.rows == 25 && t.cols == 29)) sc += 4;
+      final tl = t.title.toLowerCase();
+      if (tl.contains('น้ำมัน') || tl.contains('fuel') || tl.contains('inj')) sc += 2;
+      if (sc > bestScore) {
+        bestScore = sc;
+        best = t;
+        rpmOnRows = onRows;
+      }
+    }
+    if (best == null) return;
+    _ref = d;
+    final r = s.axisNums(best, !rpmOnRows)!, c = s.axisNums(best, rpmOnRows)!;
+    final nr = rpmOnRows ? best.rows : best.cols, nc = rpmOnRows ? best.cols : best.rows;
+    final nrpm = r.sublist(0, nr), ntps = c.sublist(0, nc);
+    final same = rows == nr && cols == nc;
+    rpm = nrpm;
+    tps = ntps;
+    src = best.title;
+    if (!same) {
+      sum = [for (int k = 0; k < nr; k++) List<double>.filled(nc, 0)];
+      cnt = [for (int k = 0; k < nr; k++) List<int>.filled(nc, 0)];
+      _restore();
+    }
+    notifyListeners();
+  }
+
+  void _feed() {
+    final c = _c;
+    if (c == null || !ready) return;
+    final t = c.t;
+    if (identical(t, _lastT)) return;
+    _lastT = t;
+    final live = c.demo || c.ecuLive;
+    final a = t.afr, rp = t.rpm, tp = t.tps;
+    if (!live || a == null || rp == null || tp == null || !a.isFinite || a < 8 || a > 22) {
+      if (liveCell != null) {
+        liveCell = null;
+        notifyListeners();
+      }
+      return;
+    }
+    final fr = _axisFrac(rpm, rp), fc = _axisFrac(tps, tp);
+    if (fr == null || fc == null) return;
+    final r = fr.round().clamp(0, rows - 1).toInt(), cc = fc.round().clamp(0, cols - 1).toInt();
+    liveCell = (r, cc);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (rec && now - _lastMs >= 90) {
+      _lastMs = now;
+      sum[r][cc] += a;
+      cnt[r][cc]++;
+      _dirty = true;
+      if (now - _saveMs > 10000) _save();
+    }
+    notifyListeners();
+  }
+
+  void clear() {
+    for (int r = 0; r < rows; r++) {
+      for (int c = 0; c < cols; c++) {
+        sum[r][c] = 0;
+        cnt[r][c] = 0;
+      }
+    }
+    _dirty = true;
+    _save();
+    notifyListeners();
+  }
+
+  void toggleRec() {
+    rec = !rec;
+    if (!rec) _save();
+    notifyListeners();
+  }
+
+  Future<io.File> _file() async => io.File('${(await getApplicationDocumentsDirectory()).path}/afr_log.json');
+
+  Future<void> _save() async {
+    _saveMs = DateTime.now().millisecondsSinceEpoch;
+    if (!_dirty || !ready) return;
+    _dirty = false;
+    try {
+      final f = await _file();
+      await f.writeAsString(jsonEncode({'rpm': rpm, 'tps': tps, 'sum': sum, 'cnt': cnt}));
+    } catch (_) {}
+  }
+
+  /// โหลดข้อมูลเก่าถ้าแกนตรงกัน (เปิดแอพใหม่แล้วข้อมูลไม่หาย)
+  Future<void> _restore() async {
+    if (_loaded) return;
+    _loaded = true;
+    try {
+      final f = await _file();
+      if (!await f.exists()) return;
+      final j = jsonDecode(await f.readAsString());
+      final r = [for (final v in j['rpm'] as List) (v as num).toDouble()];
+      final c = [for (final v in j['tps'] as List) (v as num).toDouble()];
+      if (r.length != rows || c.length != cols) return;
+      for (int k = 0; k < rows; k++) {
+        if ((r[k] - rpm[k]).abs() > 1) return;
+      }
+      for (int k = 0; k < cols; k++) {
+        if ((c[k] - tps[k]).abs() > 0.5) return;
+      }
+      final sj = j['sum'] as List, cj = j['cnt'] as List;
+      for (int a = 0; a < rows; a++) {
+        for (int b = 0; b < cols; b++) {
+          sum[a][b] = ((sj[a] as List)[b] as num).toDouble();
+          cnt[a][b] = ((cj[a] as List)[b] as num).toInt();
+        }
+      }
+      notifyListeners();
+    } catch (_) {}
+  }
+
+  void flush() => _save();
+}
+
+/// สี AFR: รวย (ต่ำ) = แดง .. 14.7 = เขียว .. บาง (สูง) = ฟ้า/น้ำเงิน
+Color _afrColor(double v) {
+  const stops = <Color>[Color(0xFFD81B3C), Color(0xFFF0961E), Color(0xFF2ED278), Color(0xFF2896E8), Color(0xFF505ADC)];
+  final t = ((v - 11.5) / (16.5 - 11.5)).clamp(0.0, 1.0).toDouble();
+  final p = t * (stops.length - 1);
+  final k = p.floor().clamp(0, stops.length - 2).toInt();
+  return Color.lerp(stops[k], stops[k + 1], p - k)!;
+}
+
+class AfrLogPage extends StatefulWidget {
+  final GaugeController c;
+  const AfrLogPage({super.key, required this.c});
+  @override
+  State<AfrLogPage> createState() => _AfrLogPageState();
+}
+
+class _AfrLogPageState extends State<AfrLogPage> {
+  final log = AfrLog.i;
+  Size _sz = Size.zero;
+
+  void _rb() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    log.attach(widget.c);
+    log.addListener(_rb);
+    Cfg.i.addListener(_rb);
+  }
+
+  @override
+  void dispose() {
+    log.removeListener(_rb);
+    Cfg.i.removeListener(_rb);
+    log.flush();
+    super.dispose();
+  }
+
+  void _tapCell(Offset p) {
+    if (!log.ready) return;
+    final g = _AfrPainter.geom(_sz, log.rows, log.cols);
+    final c = ((p.dx - g.$1) / g.$3).floor(), r = ((p.dy - g.$2) / g.$4).floor();
+    if (r < 0 || c < 0 || r >= log.rows || c >= log.cols) return;
+    final v = log.at(r, c);
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+          duration: const Duration(seconds: 2),
+          content: Text('RPM ${log.rpm[r].toStringAsFixed(0)} · TPS ${log.tps[c].toStringAsFixed(1)} : '
+              '${v == null ? 'ยังไม่มีข้อมูล' : 'AFR ${v.toStringAsFixed(2)} (${log.cnt[r][c]} ครั้ง)'}')));
+  }
+
+  Widget _btn(String t, Color col, VoidCallback? f, {bool active = false}) => Padding(
+        padding: const EdgeInsets.only(left: 6),
+        child: InkWell(
+          onTap: f,
+          borderRadius: BorderRadius.circular(8),
+          child: Container(
+            height: 32,
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: active ? col.withOpacity(0.22) : Colors.black45,
+              border: Border.all(color: col, width: 1.3),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Text(t, style: TextStyle(fontSize: 13, color: col, fontWeight: FontWeight.bold)),
+          ),
+        ),
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    final th = Cfg.i.t;
+    final live = widget.c.demo || widget.c.ecuLive;
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(8, 4, 8, 4),
+          child: Column(children: [
+            SizedBox(
+              height: 36,
+              child: Row(children: [
+                InkWell(
+                  onTap: () => Navigator.of(context).pop(),
+                  child: Row(children: [
+                    Icon(Icons.chevron_left, color: th.c, size: 26),
+                    Text('AFR LOG', style: TextStyle(fontFamily: kFont, fontSize: 15, color: th.c, shadows: [Shadow(color: th.c, blurRadius: 8)])),
+                  ]),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                      log.ready
+                          ? '${log.rows}×${log.cols} · แกนจาก "${log.src}" · บันทึกแล้ว ${log.filled} ช่อง${live ? '' : ' · ยังไม่มีข้อมูลสด (ต่อเกจ/เปิด DEMO)'}'
+                          : 'เปิด BIN + XDF ในหน้า TUNE ก่อน (ใช้แกน RPM/TPS จากตารางน้ำมัน)',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 11.5, color: live ? Colors.white70 : kAmber)),
+                ),
+                _btn(log.rec ? '● REC' : '❚❚ หยุด', log.rec ? kGreen : kAmber, log.ready ? log.toggleRec : null, active: true),
+                _btn('ล้าง', th.c, log.ready
+                    ? () async {
+                        if (await askYes(context, 'ล้าง AFR LOG', 'ลบค่าที่บันทึกไว้ทั้งหมด?', ok: 'ล้าง', col: kBad)) log.clear();
+                      }
+                    : null),
+              ]),
+            ),
+            const SizedBox(height: 4),
+            Expanded(
+              child: Container(
+                decoration: BoxDecoration(
+                  color: const Color(0xCC060606),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: th.c.withOpacity(0.85), width: 1.1),
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(9),
+                  child: log.ready
+                      ? LayoutBuilder(builder: (_, cs) {
+                          _sz = Size(cs.maxWidth, cs.maxHeight);
+                          return GestureDetector(
+                            onTapUp: (d) => _tapCell(d.localPosition),
+                            child: CustomPaint(size: Size.infinite, painter: _AfrPainter(log, th)),
+                          );
+                        })
+                      : const Center(child: Text('ยังไม่มีตาราง', style: TextStyle(color: Colors.white54))),
+                ),
+              ),
+            ),
+            SizedBox(
+              height: 22,
+              child: Row(children: [
+                Container(
+                  width: 140, height: 8,
+                  decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(4),
+                      gradient: LinearGradient(colors: [for (int k = 0; k <= 10; k++) _afrColor(11.5 + k * 0.5)])),
+                ),
+                const SizedBox(width: 6),
+                const Text('11.5 รวย · 14.7 · 16.5 บาง', style: TextStyle(fontSize: 10.5, color: Colors.white60)),
+                const Spacer(),
+                const Text('ช่องทึบ = บันทึกหลายครั้ง · ช่องมืด = ยังไม่มีข้อมูล · กรอบขาว = ตำแหน่งเครื่องตอนนี้ · แตะช่อง = ดูรายละเอียด',
+                    style: TextStyle(fontSize: 10.5, color: Colors.white54)),
+              ]),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+}
+
+class _AfrPainter extends CustomPainter {
+  final AfrLog log;
+  final AppTheme th;
+  _AfrPainter(this.log, this.th);
+
+  static const double hw = 40, hh = 18;
+  /// (x0, y0, cw, ch) ของช่องข้อมูล
+  static (double, double, double, double) geom(Size s, int rows, int cols) =>
+      (hw, hh, (s.width - hw) / cols, (s.height - hh) / rows);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rows = log.rows, cols = log.cols;
+    final g = geom(size, rows, cols);
+    final gx = g.$1, gy = g.$2, cw = g.$3, ch = g.$4;
+    final hp = Paint()..color = const Color(0xFF1A1A20);
+    canvas.drawRect(Rect.fromLTWH(0, 0, size.width, hh), hp);
+    canvas.drawRect(Rect.fromLTWH(0, 0, hw, size.height), hp);
+    final hs = math.min(9.5, cw * 0.3);
+    _TP.center(canvas, _TP.get('RPM\\TPS', 7.5, Colors.white54), Offset(hw / 2, hh / 2));
+    for (int c = 0; c < cols; c++) {
+      final v = log.tps[c];
+      _TP.center(canvas, _TP.get(v >= 10 ? v.toStringAsFixed(0) : v.toStringAsFixed(1), hs, Colors.white70, maxW: cw), Offset(gx + c * cw + cw / 2, hh / 2));
+    }
+    final rs = math.min(9.5, ch * 0.7);
+    for (int r = 0; r < rows; r++) {
+      _TP.center(canvas, _TP.get(log.rpm[r].toStringAsFixed(0), rs, Colors.white70, maxW: hw), Offset(hw / 2, gy + r * ch + ch / 2));
+    }
+    final empty = Paint()..color = const Color(0xFF121216);
+    final line = Paint()
+      ..color = const Color(0xFF26262C)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 0.6;
+    final fill = Paint();
+    final fs = math.min(ch * 0.66, math.min(cw * 0.28, 11.0));
+    int maxN = 1;
+    for (final r in log.cnt) {
+      for (final k in r) {
+        if (k > maxN) maxN = k;
+      }
+    }
+    for (int r = 0; r < rows; r++) {
+      for (int c = 0; c < cols; c++) {
+        final rect = Rect.fromLTWH(gx + c * cw, gy + r * ch, cw, ch);
+        final v = log.at(r, c);
+        if (v == null) {
+          canvas.drawRect(rect, empty);
+          canvas.drawRect(rect, line);
+          continue;
+        }
+        final a = (0.4 + 0.6 * math.min(1.0, log.cnt[r][c] / math.max(10, maxN * 0.5))).clamp(0.0, 1.0);
+        fill.color = Color.lerp(const Color(0xFF121216), _afrColor(v), a)!;
+        canvas.drawRect(rect.deflate(0.3), fill);
+        if (fs >= 4.5) _TP.center(canvas, _TP.get(v.toStringAsFixed(1), fs, const Color(0xFF000000), maxW: cw), rect.center);
+      }
+    }
+    final lc = log.liveCell;
+    if (lc != null) {
+      final rect = Rect.fromLTWH(gx + lc.$2 * cw, gy + lc.$1 * ch, cw, ch);
+      canvas.drawRect(rect.inflate(1), Paint()
+        ..color = Colors.white
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.4);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_AfrPainter o) => true;
+}
+
 // ---------- หน้า TUNE ----------
 class TunePage extends StatefulWidget {
   final GaugeController c;
@@ -3366,6 +3937,8 @@ class _TunePageState extends State<TunePage> {
   int stepMul = 1;
   double yaw = -0.85, pitch = 0.62, zoom = 1, _zoom0 = 1;
   Timer? _spin;
+  bool _adjOpen = false; // แผง "ปรับค่า" กางอยู่
+  final _adjKey = GlobalKey(), _bodyKey = GlobalKey();
   // 3D: 0 ไม่มี, 1 หมุน/ซูม, 2 ลากจุดขึ้น-ลงแก้ค่า, 3 แตะ 2 ครั้งแล้วลากคลุมเพื่อเลือก
   int _m3 = 0, _ptrs = 0, _downMs = 0, _tapUpMs = 0;
   Size _v3 = Size.zero;
@@ -3387,20 +3960,27 @@ class _TunePageState extends State<TunePage> {
     if (live && mounted) setState(() {});
   }
 
+  void _syncAfr() => AfrLog.i.syncAxes(s);
+
   @override
   void initState() {
     super.initState();
     s.addListener(_rebuild);
+    s.addListener(_syncAfr);
     Cfg.i.addListener(_rebuild);
     c.addListener(_onLive);
+    AfrLog.i.attach(c);
+    _syncAfr();
   }
 
   @override
   void dispose() {
     _spin?.cancel();
     s.removeListener(_rebuild);
+    s.removeListener(_syncAfr);
     Cfg.i.removeListener(_rebuild);
     c.removeListener(_onLive);
+    AfrLog.i.flush();
     amtCtl.dispose();
     super.dispose();
   }
@@ -3538,11 +4118,19 @@ class _TunePageState extends State<TunePage> {
     if (p.dy < hh && p.dx < hw) {
       _gMode = 5;
     } else if (p.dy < hh) {
-      _gMode = 3;
-      _gDown = ((p.dx - hw + sx) / cw).floor();
+      _gMode = 3; // หัวคอลัมน์: แตะ/ลาก = เลือกทั้งคอลัมน์ (ทุกแถว)
+      _gDown = ((p.dx - hw + sx) / cw).floor().clamp(0, t.cols - 1).toInt();
+      setState(() {
+        a0 = (0, _gDown);
+        a1 = (t.rows - 1, _gDown);
+      });
     } else if (p.dx < hw) {
-      _gMode = 4;
-      _gDown = ((p.dy - hh + sy) / ch).floor();
+      _gMode = 4; // หัวแถว: แตะ/ลาก = เลือกทั้งแถว (ทุกคอลัมน์)
+      _gDown = ((p.dy - hh + sy) / ch).floor().clamp(0, t.rows - 1).toInt();
+      setState(() {
+        a0 = (_gDown, 0);
+        a1 = (_gDown, t.cols - 1);
+      });
     } else {
       final rc = _cellAt(t, p);
       if (rc == null) {
@@ -3583,12 +4171,18 @@ class _TunePageState extends State<TunePage> {
           _clampScroll(t);
           break;
         case 3:
-          sx -= dl.dx;
+          if (p.dx > view.width - 18) sx += 12;
+          if (p.dx < hw + 8) sx -= 12;
           _clampScroll(t);
+          a0 = (0, _gDown);
+          a1 = (t.rows - 1, ((p.dx - hw + sx) / cw).floor().clamp(0, t.cols - 1).toInt());
           break;
         case 4:
-          sy -= dl.dy;
+          if (p.dy > view.height - 14) sy += 10;
+          if (p.dy < hh + 6) sy -= 10;
           _clampScroll(t);
+          a0 = (_gDown, 0);
+          a1 = (((p.dy - hh + sy) / ch).floor().clamp(0, t.rows - 1).toInt(), t.cols - 1);
           break;
       }
     });
@@ -3734,22 +4328,134 @@ class _TunePageState extends State<TunePage> {
     if (n == 0) _snack('ค่าไม่เปลี่ยน (น้อยกว่า 1 ขั้นของข้อมูล)');
   }
 
-  /// ~ เฉลี่ยค่า: ทุกช่องที่เลือกเปลี่ยนเป็นค่าเฉลี่ยของช่องที่เลือก
-  Future<void> _avg() async {
+  // ----- เครื่องมือแผง "ปรับค่า": X / Y / XY ไล่ค่าตามแกน, ~ smooth, COPY / PASTE -----
+
+  /// ตำแหน่งบนแกน (ใช้ค่าแกนจริงถ้าเรียงขึ้นหรือลงอย่างเดียว เช่น RPM ห่างไม่เท่ากัน ; ไม่งั้นใช้ลำดับช่อง)
+  List<double> _axisPos(XdfTable t, bool isX) {
+    final n = isX ? t.cols : t.rows;
+    final a = s.axisNums(t, isX);
+    if (a != null && a.length >= n) {
+      bool up = true, down = true;
+      for (int k = 1; k < n; k++) {
+        if (!a[k].isFinite || !a[k - 1].isFinite) {
+          up = down = false;
+          break;
+        }
+        if (a[k] <= a[k - 1]) up = false;
+        if (a[k] >= a[k - 1]) down = false;
+      }
+      if (up || down) return a.sublist(0, n);
+    }
+    return [for (int k = 0; k < n; k++) k.toDouble()];
+  }
+
+  /// mode 0 = X (ไล่ตามแนวนอนในแต่ละแถว), 1 = Y (ไล่ตามแนวตั้งในแต่ละคอลัมน์), 2 = XY (ยึด 4 มุม ไล่ทั้งสองแกน)
+  Future<void> _interp(int mode) async {
     final t = s.table;
-    if (t == null || !_needSel() || !await _canEdit(t)) return;
-    final cells = _cells;
-    if (cells.length < 2) {
-      _snack('เลือกอย่างน้อย 2 ช่องเพื่อเฉลี่ยค่า');
+    final g = _sel;
+    if (t == null || g == null || !_needSel() || !await _canEdit(t)) return;
+    final (r0, c0, r1, c1) = g;
+    if ((mode == 0 || mode == 2) && c1 == c0) {
+      _snack('เลือกอย่างน้อย 2 คอลัมน์');
       return;
     }
-    double sum = 0;
-    for (final rc in cells) {
-      sum += s.val(t, rc.$1, rc.$2);
+    if ((mode == 1 || mode == 2) && r1 == r0) {
+      _snack('เลือกอย่างน้อย 2 แถว');
+      return;
     }
-    final m = sum / cells.length;
-    final n = s.write(t, {for (final rc in cells) rc: m}, '~ เฉลี่ย ${cells.length} ช่อง = ${t.fmt(m)}');
-    if (n == 0) _snack('ค่าไม่เปลี่ยน (ทุกช่องเท่าค่าเฉลี่ยอยู่แล้ว)');
+    final px = _axisPos(t, true), py = _axisPos(t, false);
+    double fx(int c) => (px[c] - px[c0]) / (px[c1] - px[c0]);
+    double fy(int r) => (py[r] - py[r0]) / (py[r1] - py[r0]);
+    final out = <(int, int), double>{};
+    final v00 = s.val(t, r0, c0), v01 = s.val(t, r0, c1), v10 = s.val(t, r1, c0), v11 = s.val(t, r1, c1);
+    for (int r = r0; r <= r1; r++) {
+      for (int c = c0; c <= c1; c++) {
+        double v;
+        if (mode == 0) {
+          final a = s.val(t, r, c0), b = s.val(t, r, c1), f = fx(c);
+          v = a + (b - a) * f;
+        } else if (mode == 1) {
+          final a = s.val(t, r0, c), b = s.val(t, r1, c), f = fy(r);
+          v = a + (b - a) * f;
+        } else {
+          final u = fx(c), w = fy(r);
+          v = v00 * (1 - u) * (1 - w) + v01 * u * (1 - w) + v10 * (1 - u) * w + v11 * u * w;
+        }
+        out[(r, c)] = v;
+      }
+    }
+    final n = s.write(t, out, const ['ไล่ค่า X', 'ไล่ค่า Y', 'ไล่ค่า XY'][mode]);
+    if (n == 0) _snack('ค่าไม่เปลี่ยน');
+  }
+
+  /// ~ smooth: แต่ละช่องที่เลือก = ค่าเฉลี่ยของตัวเองกับช่องรอบข้าง 8 ช่อง (อ่านค่าเดิมก่อนแก้ทั้งหมด)
+  Future<void> _smooth() async {
+    final t = s.table;
+    if (t == null || !_needSel() || !await _canEdit(t)) return;
+    final out = <(int, int), double>{};
+    for (final rc in _cells) {
+      double sum = 0;
+      int n = 0;
+      for (int dr = -1; dr <= 1; dr++) {
+        for (int dc = -1; dc <= 1; dc++) {
+          final r = rc.$1 + dr, c = rc.$2 + dc;
+          if (r < 0 || c < 0 || r >= t.rows || c >= t.cols) continue;
+          final v = s.val(t, r, c);
+          if (!v.isFinite) continue;
+          sum += v;
+          n++;
+        }
+      }
+      if (n > 0) out[rc] = sum / n;
+    }
+    final k = s.write(t, out, '~ smooth ${out.length} ช่อง');
+    if (k == 0) _snack('ค่าไม่เปลี่ยน (เรียบอยู่แล้ว หรือน้อยกว่า 1 ขั้นของข้อมูล)');
+  }
+
+  static List<List<double>>? _clip; // คลิปบอร์ด (คงอยู่ระหว่างเปลี่ยนตาราง)
+  static String _clipFrom = '';
+
+  void _copy() {
+    final t = s.table;
+    final g = _sel;
+    if (t == null || g == null || !_needSel()) return;
+    final (r0, c0, r1, c1) = g;
+    _clip = [
+      for (int r = r0; r <= r1; r++) [for (int c = c0; c <= c1; c++) s.val(t, r, c)],
+    ];
+    _clipFrom = t.title;
+    setState(() {});
+    _snack('คัดลอก ${r1 - r0 + 1}×${c1 - c0 + 1} ช่องจาก "${t.title}" แล้ว');
+  }
+
+  Future<void> _paste() async {
+    final t = s.table;
+    final cb = _clip;
+    final g = _sel;
+    if (t == null || cb == null || cb.isEmpty) return;
+    if (g == null) {
+      _snack('เลือกช่องมุมซ้ายบนที่จะวางก่อน');
+      return;
+    }
+    if (!await _canEdit(t)) return;
+    final out = <(int, int), double>{};
+    for (int i = 0; i < cb.length; i++) {
+      for (int j = 0; j < cb[i].length; j++) {
+        final r = g.$1 + i, c = g.$2 + j;
+        if (r >= t.rows || c >= t.cols || !cb[i][j].isFinite) continue;
+        out[(r, c)] = cb[i][j];
+      }
+    }
+    final rows = cb.length, cols = cb[0].length;
+    final cut = out.length < rows * cols;
+    final n = s.write(t, out, 'วาง ${rows}×$cols');
+    setState(() {
+      a0 = (g.$1, g.$2);
+      a1 = (math.min(t.rows - 1, g.$1 + rows - 1), math.min(t.cols - 1, g.$2 + cols - 1));
+    });
+    _snack(n == 0
+        ? 'ค่าไม่เปลี่ยน (ค่าเท่าเดิม)'
+        : 'วางจาก "$_clipFrom" แล้ว${cut ? ' (ส่วนที่เกินขอบตารางถูกตัดออก)' : ''}');
   }
 
   Future<void> _setVal({bool ask = false}) async {
@@ -4130,58 +4836,97 @@ class _TunePageState extends State<TunePage> {
     return best;
   }
 
-  void _p3Down(PointerDownEvent e) {
-    _ptrs++;
-    if (_ptrs > 1) {
-      _dblArm = false;
-      return;
-    }
-    final now = _ms();
-    _dblArm = now - _tapUpMs < 320 && (e.localPosition - _tapUpPos).distance < 40;
-    _downMs = now;
-    _downPos = e.localPosition;
-  }
+  // ----- 3D (อ่านนิ้วเองทั้งหมด ไม่ผ่าน GestureDetector เพื่อให้จับ "แตะ 2 ครั้งแล้วลาก" ได้แน่นอน) -----
+  // 1 นิ้ว: แตะจุด = เลือก | ลากจุด = แก้ค่าขึ้น/ลง | ลากที่ว่าง = หมุน | แตะ 2 ครั้งแล้วลาก = เลือกคลุม
+  // 2 นิ้ว: ซูม
+  final Map<int, Offset> _p3 = {};
+  Offset _p3Start = Offset.zero, _p3Last = Offset.zero;
+  int _p3DownMs = 0;
+  bool _p3Moved = false;
+  double _pinch0 = 0;
 
-  void _p3Up(PointerEvent e) {
-    _ptrs = math.max(0, _ptrs - 1);
-    if (e is! PointerUpEvent) return;
-    final now = _ms();
-    final tap = now - _downMs < 260 && (e.localPosition - _downPos).distance < 14;
-    if (!tap) return;
-    if (_dblArm) {
-      _tapUpMs = 0; // แตะ 2 ครั้งโดยไม่ลาก: ไม่ทำอะไร
-      _dblArm = false;
-      return;
-    }
-    _tapUpMs = now;
-    _tapUpPos = e.localPosition;
-    final t = s.table;
-    if (t == null) return;
-    final h = _hit3(t, e.localPosition);
-    if (h != null) {
-      _stopSpin();
-      setState(() {
-        a0 = h;
-        a1 = h;
-      });
-    }
-  }
-
-  void _s3Start(XdfTable t, ScaleStartDetails d) {
+  void _p3Down(XdfTable t, PointerDownEvent e) {
+    _p3[e.pointer] = e.localPosition;
     _stopSpin();
-    _zoom0 = zoom;
-    if (d.pointerCount > 1) {
-      _m3 = 1;
+    if (_p3.length >= 2) {
+      if (_m3 != 4) _end1();
+      final ps = _p3.values.toList();
+      _pinch0 = (ps[0] - ps[1]).distance;
+      _zoom0 = zoom;
+      _m3 = 4;
       return;
     }
+    final now = _ms();
+    _dblArm = now - _tapUpMs < 450 && (e.localPosition - _tapUpPos).distance < 60;
+    _p3DownMs = now;
+    _p3Start = _p3Last = e.localPosition;
+    _p3Moved = false;
+    _m3 = 0;
+  }
+
+  void _p3Move(XdfTable t, PointerMoveEvent e) {
+    if (!_p3.containsKey(e.pointer)) return;
+    _p3[e.pointer] = e.localPosition;
+    if (_m3 == 4) {
+      if (_p3.length >= 2 && _pinch0 > 0) {
+        final ps = _p3.values.toList();
+        setState(() => zoom = (_zoom0 * (ps[0] - ps[1]).distance / _pinch0).clamp(0.4, 4.0).toDouble());
+      }
+      return;
+    }
+    if (_p3.length != 1) return;
+    final p = e.localPosition;
+    if (!_p3Moved) {
+      if ((p - _p3Start).distance < 8) return;
+      _p3Moved = true;
+      _begin1(t, _p3Start);
+    }
+    final dl = p - _p3Last;
+    _p3Last = p;
+    _move1(t, p, dl);
+  }
+
+  void _p3Up(XdfTable t, PointerEvent e) {
+    if (_p3.remove(e.pointer) == null) return;
+    if (_m3 == 4) {
+      if (_p3.isEmpty) _m3 = 0;
+      return;
+    }
+    if (e is PointerCancelEvent) {
+      _end1();
+      return;
+    }
+    final now = _ms();
+    if (!_p3Moved && now - _p3DownMs < 350) {
+      if (_dblArm) {
+        // แตะ 2 ครั้งแต่ไม่ได้ลาก = ไม่ทำอะไร
+        _dblArm = false;
+        _tapUpMs = 0;
+        return;
+      }
+      _tapUpMs = now;
+      _tapUpPos = e.localPosition;
+      final h = _hit3(t, e.localPosition);
+      if (h != null) {
+        setState(() {
+          a0 = h;
+          a1 = h;
+        });
+      }
+      return;
+    }
+    _end1();
+  }
+
+  void _begin1(XdfTable t, Offset start) {
     if (_dblArm) {
       _m3 = 3;
-      _boxA = d.localFocalPoint;
-      _boxB = d.localFocalPoint;
+      _boxA = start;
+      _boxB = start;
       setState(() {});
       return;
     }
-    final h = _hit3(t, d.localFocalPoint);
+    final h = _hit3(t, start);
     if (h == null) {
       _m3 = 1;
       return;
@@ -4205,56 +4950,51 @@ class _TunePageState extends State<TunePage> {
     setState(() {});
   }
 
-  void _s3Update(XdfTable t, ScaleUpdateDetails d) {
-    if (d.pointerCount > 1) {
-      setState(() => zoom = (_zoom0 * d.scale).clamp(0.4, 4.0).toDouble());
-      return;
-    }
+  void _move1(XdfTable t, Offset p, Offset dl) {
     switch (_m3) {
       case 1:
         setState(() {
-          yaw -= d.focalPointDelta.dx * 0.01;
-          pitch = (pitch + d.focalPointDelta.dy * 0.008).clamp(0.1, 1.5).toDouble();
+          yaw -= dl.dx * 0.01;
+          pitch = (pitch + dl.dy * 0.008).clamp(0.1, 1.5).toDouble();
         });
       case 2:
         {
-        _dragDy += d.focalPointDelta.dy;
-        final lo = _fLo ?? 0, hi = _fHi ?? 1;
-        final span = hi > lo ? hi - lo : 1.0;
-        final px = _proj3(t, lo, hi).sc * _Proj3.zh * math.cos(pitch); // พิกเซลต่อความสูงแกน Z ทั้งแกน
-        if (px <= 0) return;
-        final dv = -_dragDy / px * span;
-        s.write(t, {for (final e in _dragBase.entries) e.key: e.value + dv}, 'ลากจุด 3D', merge: true);
+          _dragDy += dl.dy;
+          final lo = _fLo ?? 0, hi = _fHi ?? 1;
+          final span = hi > lo ? hi - lo : 1.0;
+          final px = _proj3(t, lo, hi).sc * _Proj3.zh * math.cos(pitch);
+          if (px <= 0) return;
+          final dv = -_dragDy / px * span;
+          s.write(t, {for (final e in _dragBase.entries) e.key: e.value + dv}, 'ลากจุด 3D', merge: true);
         }
       case 3:
         {
-        _boxB = d.localFocalPoint;
-        final a = _boxA!, b = _boxB!;
-        final rect = Rect.fromPoints(a, b);
-        final (v, lo, hi) = _range3(t);
-        final P = _proj3(t, lo, hi);
-        int r0 = 1 << 30, c0 = 1 << 30, r1 = -1, c1 = -1;
-        for (int r = 0; r < t.rows; r++) {
-          for (int c = 0; c < t.cols; c++) {
-            if (v[r][c].isNaN) continue;
-            if (!rect.contains(P.pt(r.toDouble(), c.toDouble(), v[r][c]).$1)) continue;
-            r0 = math.min(r0, r);
-            c0 = math.min(c0, c);
-            r1 = math.max(r1, r);
-            c1 = math.max(c1, c);
+          _boxB = p;
+          final rect = Rect.fromPoints(_boxA!, p);
+          final (v, lo, hi) = _range3(t);
+          final P = _proj3(t, lo, hi);
+          int r0 = 1 << 30, c0 = 1 << 30, r1 = -1, c1 = -1;
+          for (int r = 0; r < t.rows; r++) {
+            for (int c = 0; c < t.cols; c++) {
+              if (v[r][c].isNaN) continue;
+              if (!rect.contains(P.pt(r.toDouble(), c.toDouble(), v[r][c]).$1)) continue;
+              r0 = math.min(r0, r);
+              c0 = math.min(c0, c);
+              r1 = math.max(r1, r);
+              c1 = math.max(c1, c);
+            }
           }
-        }
-        setState(() {
-          if (r1 >= 0) {
-            a0 = (r0, c0);
-            a1 = (r1, c1);
-          }
-        });
+          setState(() {
+            if (r1 >= 0) {
+              a0 = (r0, c0);
+              a1 = (r1, c1);
+            }
+          });
         }
     }
   }
 
-  void _s3End() {
+  void _end1() {
     final dragged = _m3 == 2;
     _m3 = 0;
     _boxA = null;
@@ -4263,7 +5003,6 @@ class _TunePageState extends State<TunePage> {
     _fHi = null;
     _dragBase = {};
     _dblArm = false;
-    _tapUpMs = 0;
     if (mounted) setState(() {});
     if (dragged && s.table != null && !s.tableDirty(s.table!)) _snack('ค่าไม่เปลี่ยน (น้อยกว่า 1 ขั้นของข้อมูล)');
   }
@@ -4320,7 +5059,13 @@ class _TunePageState extends State<TunePage> {
                 ]),
               ),
               const SizedBox(height: 2),
-              Expanded(child: _body(th)),
+              Expanded(
+                child: Stack(key: _bodyKey, clipBehavior: Clip.none, children: [
+                  Positioned.fill(child: _body(th)),
+                  if (_adjOpen && s.ready && t != null && t.valid)
+                    Positioned(top: -8, left: _adjLeft(), right: 0, child: Align(alignment: Alignment.topLeft, child: _adjPanel(th))),
+                ]),
+              ),
             ]),
           ),
         ),
@@ -4398,41 +5143,26 @@ class _TunePageState extends State<TunePage> {
               ),
               _tb(th, const Text('❌', style: TextStyle(fontSize: 15)), can ? _cancelTable : null, col: kBad, width: 42),
               _sep(),
-              // ช่องใส่ค่าที่จะเปลี่ยน: − + = เพิ่ม/ลดเท่าค่านี้ | % = เปลี่ยนเป็น % | = = ตั้งเป็นค่านี้ (ว่าง = ใช้ STEP / ถามค่า)
-              Padding(
-                padding: const EdgeInsets.only(right: 5),
-                child: SizedBox(
-                  width: 76,
-                  height: 34,
-                  child: TextField(
-                    controller: amtCtl,
-                    enabled: can,
-                    keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(fontSize: 13),
-                    onChanged: (_) => setState(() {}),
-                    decoration: InputDecoration(
-                      isDense: true,
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 6, vertical: 9),
-                      hintText: t == null ? 'ค่า' : 'ค่า ${_numStr(_step(t))}',
-                      hintStyle: const TextStyle(fontSize: 11.5, color: Colors.white38),
-                      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: th.c.withOpacity(0.8))),
-                      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: th.c2, width: 1.5)),
-                      disabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Colors.white24)),
-                    ),
-                  ),
-                ),
+              // ปรับค่า: แตะแล้วกางแผง ช่องค่า | − + % = | X Y XY ~
+              _tb(
+                th,
+                Row(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(Icons.edit, size: 15, color: th.c),
+                  const SizedBox(width: 5),
+                  const Text('ปรับค่า'),
+                  Icon(_adjOpen && can ? Icons.expand_less : Icons.expand_more, size: 18, color: th.c),
+                ]),
+                can ? () => setState(() => _adjOpen = !_adjOpen) : null,
+                active: _adjOpen && can,
+                key: _adjKey,
               ),
-              Opacity(opacity: can ? 1 : 0.4, child: StepBtn(label: '−', onStep: () => can ? _bump(-1) : null, th: th)),
-              const SizedBox(width: 4),
-              Opacity(opacity: can ? 1 : 0.4, child: StepBtn(label: '+', onStep: () => can ? _bump(1) : null, th: th)),
-              const SizedBox(width: 4),
-              _tb(th, const Text('%', style: TextStyle(fontSize: 15)), can ? _pct : null),
-              _tb(th, const Text('~', style: TextStyle(fontSize: 18)), can ? _avg : null),
-              _tb(th, const Text('=', style: TextStyle(fontSize: 15)), can ? () => _setVal() : null),
               _sep(),
               _tb(th, Icon(Icons.undo, size: 18, color: th.c), s.undoList.isNotEmpty ? _undo : null),
               _tb(th, Icon(Icons.redo, size: 18, color: th.c), s.redoList.isNotEmpty ? _redo : null),
+              _sep(),
+              _tb(th, const Text('COPY', style: TextStyle(fontFamily: kFont, fontSize: 10.5)), can && _sel != null ? _copy : null),
+              _tb(th, const Text('PASTE', style: TextStyle(fontFamily: kFont, fontSize: 10.5)), can && _clip != null ? _paste : null),
+              _tb(th, const Text('AFR', style: TextStyle(fontFamily: kFont, fontSize: 10.5, color: kGreen)), _openAfr, col: kGreen),
               _sep(),
               _tb(
                 th,
@@ -4471,6 +5201,79 @@ class _TunePageState extends State<TunePage> {
         ),
       ]),
     );
+  }
+
+  Future<void> _openAfr() async {
+    AfrLog.i.attach(c);
+    AfrLog.i.syncAxes(s);
+    await Navigator.of(context).push(MaterialPageRoute(builder: (_) => AfrLogPage(c: c)));
+  }
+
+  double _adjLeft() {
+    final a = _adjKey.currentContext?.findRenderObject() as RenderBox?;
+    final b = _bodyKey.currentContext?.findRenderObject() as RenderBox?;
+    if (a == null || b == null || !a.attached || !b.attached) return 0;
+    return math.max(0.0, a.localToGlobal(Offset.zero).dx - b.localToGlobal(Offset.zero).dx - 12);
+  }
+
+  /// แผง "ปรับค่า" ลอยทับตาราง (ยังเลือกช่องในตารางได้ระหว่างเปิด / แตะปุ่ม "ปรับค่า" อีกครั้ง = ยุบ)
+  Widget _adjPanel(AppTheme th) {
+    final t = s.table;
+    final can = s.ready && t != null && t.valid;
+    Widget k(String txt, VoidCallback? f, {double fs = 16, bool eth = false}) =>
+        _tb(th, Text(txt, style: TextStyle(fontSize: fs, fontFamily: eth ? kFont : null)), can ? f : null, width: eth && txt.length > 1 ? 50 : 42);
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+      Padding(padding: const EdgeInsets.only(left: 44), child: CustomPaint(size: const Size(16, 8), painter: _TriPainter(th.c))),
+      Material(
+        color: const Color(0xF4141018),
+        elevation: 10,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14), side: BorderSide(color: th.c, width: 1.4)),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(8, 7, 4, 7),
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              Padding(
+                padding: const EdgeInsets.only(right: 5),
+                child: SizedBox(
+                  width: 130,
+                  height: 34,
+                  child: TextField(
+                    controller: amtCtl,
+                    enabled: can,
+                    keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(fontSize: 13),
+                    onChanged: (_) => setState(() {}),
+                    decoration: InputDecoration(
+                      isDense: true,
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 6, vertical: 9),
+                      hintText: t == null ? 'ใส่ค่าที่ต้องการ' : 'ใส่ค่า (STEP ${_numStr(_step(t))})',
+                      hintStyle: const TextStyle(fontSize: 11.5, color: Colors.white38),
+                      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Colors.white38)),
+                      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: th.c2, width: 1.5)),
+                      disabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Colors.white24)),
+                    ),
+                  ),
+                ),
+              ),
+              _sep(),
+              Opacity(opacity: can ? 1 : 0.4, child: StepBtn(label: '−', onStep: () => can ? _bump(-1) : null, th: th)),
+              const SizedBox(width: 4),
+              Opacity(opacity: can ? 1 : 0.4, child: StepBtn(label: '+', onStep: () => can ? _bump(1) : null, th: th)),
+              const SizedBox(width: 4),
+              k('%', _pct, fs: 15),
+              k('=', () => _setVal(), fs: 15),
+              _sep(),
+              k('X', () => _interp(0), fs: 12, eth: true),
+              k('Y', () => _interp(1), fs: 12, eth: true),
+              k('XY', () => _interp(2), fs: 12, eth: true),
+              k('~', _smooth, fs: 18),
+            ]),
+          ),
+        ),
+      ),
+    ]);
   }
 
   Widget _fileMenu(AppTheme th) {
@@ -4672,14 +5475,12 @@ class _TunePageState extends State<TunePage> {
           child: t.is2D
               ? Stack(children: [
                   Listener(
-                    onPointerDown: _p3Down,
-                    onPointerUp: _p3Up,
-                    onPointerCancel: _p3Up,
-                    child: GestureDetector(
-                      onScaleStart: (d) => _s3Start(t, d),
-                      onScaleUpdate: (d) => _s3Update(t, d),
-                      onScaleEnd: (_) => _s3End(),
-                      child: LayoutBuilder(builder: (_, cs) {
+                    onPointerDown: (e) => _p3Down(t, e),
+                    onPointerMove: (e) => _p3Move(t, e),
+                    onPointerUp: (e) => _p3Up(t, e),
+                    onPointerCancel: (e) => _p3Up(t, e),
+                    child: Builder(builder: (_) {
+                      return LayoutBuilder(builder: (_, cs) {
                         _v3 = Size(cs.maxWidth, cs.maxHeight);
                         return CustomPaint(
                           size: Size.infinite,
@@ -4692,8 +5493,8 @@ class _TunePageState extends State<TunePage> {
                             box: _boxA != null && _boxB != null ? Rect.fromPoints(_boxA!, _boxB!) : null,
                           ),
                         );
-                      }),
-                    ),
+                      });
+                    }),
                   ),
                   Positioned(
                     left: 10,
@@ -4751,7 +5552,7 @@ class _TunePageState extends State<TunePage> {
             const Positioned(
               right: 8, bottom: 4,
               child: IgnorePointer(
-                child: Text('1 นิ้ว = เลือก · 2 นิ้ว = ซูม/เลื่อน · ลากหัวตาราง = เลื่อน · แตะ 2 ครั้ง = ใส่ค่า · FIT = พอดีจอ',
+                child: Text('1 นิ้ว = เลือก · 2 นิ้ว = ซูม/เลื่อน · แตะ/ลากหัวตาราง = เลือกทั้งแถว/คอลัมน์ · แตะ 2 ครั้ง = ใส่ค่า · FIT = พอดีจอ',
                     style: TextStyle(fontSize: 9.5, color: Colors.white30)),
               ),
             ),
@@ -4798,17 +5599,17 @@ class _TunePageState extends State<TunePage> {
                         onTap: toggle,
                         borderRadius: BorderRadius.circular(12),
                         child: Container(
-                          margin: const EdgeInsets.only(bottom: 6),
-                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                          margin: const EdgeInsets.only(bottom: 5),
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
                           decoration: BoxDecoration(
                             color: Colors.white.withOpacity(0.05),
                             borderRadius: BorderRadius.circular(12),
                             border: Border.all(color: th.c.withOpacity(0.6)),
                           ),
                           child: Row(children: [
-                            Icon(ic, color: th.c2, size: 22),
-                            const SizedBox(width: 12),
-                            Text(title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                            Icon(ic, color: th.c2, size: 18),
+                            const SizedBox(width: 10),
+                            Text(title, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
                             const SizedBox(width: 8),
                             Text('($n)', style: const TextStyle(fontSize: 12, color: Colors.white54)),
                             const Spacer(),
@@ -4829,8 +5630,8 @@ class _TunePageState extends State<TunePage> {
                       onTap: t.valid ? () => Navigator.of(dctx).pop(i) : null,
                       borderRadius: BorderRadius.circular(8),
                       child: Container(
-                        margin: const EdgeInsets.only(bottom: 5, left: 6),
-                        padding: const EdgeInsets.all(6),
+                        margin: const EdgeInsets.only(bottom: 4, left: 6),
+                        padding: EdgeInsets.symmetric(horizontal: 8, vertical: sub.isEmpty ? 7 : 5),
                         decoration: BoxDecoration(
                           color: on ? th.c.withOpacity(0.2) : Colors.white.withOpacity(0.03),
                           border: Border.all(color: on ? th.c : Colors.white12, width: on ? 1.5 : 1),
@@ -4838,14 +5639,15 @@ class _TunePageState extends State<TunePage> {
                         ),
                         child: Row(children: [
                           lead,
-                          const SizedBox(width: 8),
+                          if (lead is! SizedBox) const SizedBox(width: 8),
                           Expanded(
                             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                               Row(children: [
                                 if (t.isLock) const Padding(padding: EdgeInsets.only(right: 4), child: Icon(Icons.lock, size: 13, color: kBad)),
                                 Flexible(child: Text(t.title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold))),
                               ]),
-                              Text(t.valid ? sub : 'อยู่นอกไฟล์ BIN', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 10.5, color: Colors.white54)),
+                              if (!t.valid || sub.isNotEmpty)
+                                Text(t.valid ? sub : 'อยู่นอกไฟล์ BIN', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 10.5, color: Colors.white54)),
                             ]),
                           ),
                           if (t.valid && s.tableDirty(t))
@@ -4905,16 +5707,7 @@ class _TunePageState extends State<TunePage> {
                       ),
                   ]),
                   section(Icons.grid_on, 'ตารางจูน', items2.length, open2, () => setM(() => open2 = !open2), [
-                    for (final i in items2)
-                      tile(
-                        i,
-                        Container(
-                          width: 66, height: 40,
-                          decoration: BoxDecoration(border: Border.all(color: Colors.white24), borderRadius: BorderRadius.circular(3)),
-                          child: d.tables[i].valid ? CustomPaint(painter: _ThumbPainter(s.values(d.tables[i]))) : null,
-                        ),
-                        '${d.tables[i].rows}×${d.tables[i].cols} · @0x${d.tables[i].z.addr.toRadixString(16).toUpperCase()} · ${d.tables[i].eq.src}',
-                      ),
+                    for (final i in items2) tile(i, const SizedBox.shrink(), ''), // แค่ชื่อตาราง (ไม่มีภาพย่อ / สูตร)
                   ]),
                   section(Icons.linear_scale, 'ค่า / แกน 1 มิติ', items1.length, open1, () => setM(() => open1 = !open1), [
                     for (final i in items1)
