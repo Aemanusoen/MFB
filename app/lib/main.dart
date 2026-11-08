@@ -4695,7 +4695,7 @@ class _TunePageState extends State<TunePage> {
                       RichText(
                         text: TextSpan(style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white), children: [
                           TextSpan(text: o.model.isEmpty ? o.name : o.model.split(' (').first),
-                          TextSpan(text: '  ${o.name}', style: const TextStyle(fontSize: 14, color: Colors.white70, fontFeatures: [FontFeature.tabularFigures])),
+                          TextSpan(text: '  ${o.name}', style: const TextStyle(fontSize: 14, color: Colors.white70)),
                         ]),
                       ),
                       const SizedBox(height: 3),
