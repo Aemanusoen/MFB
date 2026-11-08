@@ -1205,7 +1205,7 @@ class _GaugePageState extends State<GaugePage> {
                 const SizedBox(width: 6),
                 _btn('DEMO', c.toggleDemo, th, active: c.demo),
                 const SizedBox(width: 6),
-                _btn('แฟลช⚡', () {
+                _btn('FLASH⚡', () {
                   Navigator.of(context).push(MaterialPageRoute(builder: (_) => FlashPage(c: c)));
                 }, th),
                 const SizedBox(width: 6),
@@ -2702,7 +2702,7 @@ class XdfDef {
     }
     if (txt.startsWith('﻿')) txt = txt.substring(1);
     if (!txt.trimLeft().startsWith('<')) {
-      throw XdfError('ไฟล์ XDF นี้ไม่ใช่ XML (น่าจะถูกเข้ารหัส) — ใช้ไฟล์ที่ปลดล็อกแล้ว เช่น K03-H01_unlock.xdf');
+      throw XdfError('XDF นี้ถูกเข้ารหัสโดยผู้ทำไฟล์ (เปิดได้เฉพาะใน TunerPro) — ขอไฟล์แบบที่ไม่เข้ารหัสจากผู้ขาย');
     }
     XmlDocument doc;
     try {
@@ -3355,6 +3355,15 @@ class _TunePageState extends State<TunePage> {
   int stepMul = 1;
   double yaw = -0.85, pitch = 0.62, zoom = 1, _zoom0 = 1;
   Timer? _spin;
+  // 3D: 0 ไม่มี, 1 หมุน/ซูม, 2 ลากจุดขึ้น-ลงแก้ค่า, 3 แตะ 2 ครั้งแล้วลากคลุมเพื่อเลือก
+  int _m3 = 0, _ptrs = 0, _downMs = 0, _tapUpMs = 0;
+  Size _v3 = Size.zero;
+  Offset _downPos = Offset.zero, _tapUpPos = Offset.zero;
+  bool _dblArm = false;
+  Offset? _boxA, _boxB;
+  Map<(int, int), double> _dragBase = {};
+  double _dragDy = 0;
+  double? _fLo, _fHi; // ล็อกสเกลแกน Z ระหว่างลากแก้ค่า
   bool _asking = false;
   final amtCtl = TextEditingController();
   final _tblKey = GlobalKey();
@@ -3714,6 +3723,24 @@ class _TunePageState extends State<TunePage> {
     if (n == 0) _snack('ค่าไม่เปลี่ยน (น้อยกว่า 1 ขั้นของข้อมูล)');
   }
 
+  /// ~ เฉลี่ยค่า: ทุกช่องที่เลือกเปลี่ยนเป็นค่าเฉลี่ยของช่องที่เลือก
+  Future<void> _avg() async {
+    final t = s.table;
+    if (t == null || !_needSel() || !await _canEdit(t)) return;
+    final cells = _cells;
+    if (cells.length < 2) {
+      _snack('เลือกอย่างน้อย 2 ช่องเพื่อเฉลี่ยค่า');
+      return;
+    }
+    double sum = 0;
+    for (final rc in cells) {
+      sum += s.val(t, rc.$1, rc.$2);
+    }
+    final m = sum / cells.length;
+    final n = s.write(t, {for (final rc in cells) rc: m}, '~ เฉลี่ย ${cells.length} ช่อง = ${t.fmt(m)}');
+    if (n == 0) _snack('ค่าไม่เปลี่ยน (ทุกช่องเท่าค่าเฉลี่ยอยู่แล้ว)');
+  }
+
   Future<void> _setVal({bool ask = false}) async {
     final t = s.table;
     if (t == null || !_needSel() || !await _canEdit(t)) return;
@@ -3735,31 +3762,41 @@ class _TunePageState extends State<TunePage> {
     _snack(l == null ? 'ไม่มีให้ทำซ้ำ' : 'ทำซ้ำ: $l');
   }
 
-  // ----- ✅ บันทึก / ❌ ยกเลิก ค่าของตารางที่เปิดอยู่ -----
+  // ----- ✅ บันทึกแล้วปิดตาราง / ❌ ปิดตาราง (ถามบันทึก/ไม่บันทึกก่อนปิด) -----
   void _okTable() {
     final t = s.table;
     if (t == null) return;
-    if (!s.tableDirty(t)) {
-      _snack('ตารางนี้ไม่มีค่าที่ต้องบันทึก');
-      return;
-    }
-    s.commitTable(t);
-    _snack('บันทึกค่า "${t.title}" แล้ว ✅');
+    final dirty = s.tableDirty(t);
+    if (dirty) s.commitTable(t);
+    _stopSpin();
+    s.select(-1);
+    _snack(dirty ? 'บันทึกค่า "${t.title}" แล้ว ✅' : 'ปิด "${t.title}" (ไม่มีค่าที่เปลี่ยน)');
   }
 
   Future<void> _cancelTable() async {
     final t = s.table;
     if (t == null) return;
-    if (!s.tableDirty(t)) {
-      _snack('ตารางนี้ไม่มีค่าที่แก้ค้างอยู่');
-      return;
+    if (s.tableDirty(t)) {
+      final r = await showDialog<int>(
+        context: context,
+        builder: (dctx) => AlertDialog(
+          backgroundColor: const Color(0xFF14141A),
+          title: const Text('ปิดตารางจูน', style: TextStyle(fontSize: 16)),
+          content: Text('ตาราง "${t.title}" มีค่าที่แก้แต่ยังไม่ได้บันทึก
+ต้องการบันทึกก่อนปิดหรือไม่?'),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(dctx).pop(0), child: const Text('ยกเลิก')),
+            TextButton(onPressed: () => Navigator.of(dctx).pop(1), child: const Text('ไม่บันทึก', style: TextStyle(color: kBad))),
+            TextButton(onPressed: () => Navigator.of(dctx).pop(2), child: const Text('บันทึก', style: TextStyle(color: kGreen, fontWeight: FontWeight.bold))),
+          ],
+        ),
+      );
+      if (r == null || r == 0) return;
+      if (r == 1) s.revertTable(t);
+      if (r == 2) s.commitTable(t);
     }
-    final ok = await askYes(context, 'ยกเลิกการแก้ไข?',
-        'ค่าที่แก้ใน "${t.title}" หลังจากกด ✅ ครั้งล่าสุด จะกลับเป็นค่าเดิมทั้งหมด\n(ยังย้อนกลับได้ด้วยปุ่ม ↶)',
-        ok: 'ยกเลิกค่า ❌', col: kBad);
-    if (!ok) return;
-    s.revertTable(t);
-    _snack('ยกเลิกค่าที่แก้ใน "${t.title}" แล้ว');
+    _stopSpin();
+    s.select(-1);
   }
 
   /// เปลี่ยนตาราง: ถ้าตารางเดิมมีค่าค้าง ถามก่อน
@@ -3976,7 +4013,7 @@ class _TunePageState extends State<TunePage> {
                   style: const TextStyle(fontSize: 12.5)),
               box(kAmber, 'CHECKSUM (ไม่แก้อัตโนมัติ)',
                   'ผลรวมไบต์ของไฟล์ตอนนี้ = 0x${sum8.toRadixString(16).toUpperCase().padLeft(2, '0')}${sum8 == 0 ? ' (ผ่าน)' : ' (ยังไม่ผ่าน)'}\n'
-                      'ใส่ Start Offset และตำแหน่ง checksum (Fix) ตอนกดแฟลชในหน้าแฟลช⚡ หรือในโปรแกรมแฟลชที่ใช้'),
+                      'ใส่ Start Offset และตำแหน่ง checksum (Fix) ตอนกดแฟลชในหน้า FLASH⚡ หรือในโปรแกรมแฟลชที่ใช้'),
               if (locks.isEmpty)
                 box(Colors.white38, 'รหัสล็อคกล่อง', 'ไม่ได้เปลี่ยน')
               else
@@ -4006,7 +4043,7 @@ class _TunePageState extends State<TunePage> {
         if (!mounted) return;
         if (BinLib.i.exists(name) && !await askYes(context, 'ชื่อซ้ำ', 'มีไฟล์ชื่อ "$name" ในคลังแล้ว เขียนทับหรือไม่?', ok: 'เขียนทับ')) return;
         await BinLib.i.save(name, bytes);
-        _snack('บันทึกเข้าคลังแล้ว: $name — แฟลชได้ที่หน้าแฟลช⚡');
+        _snack('บันทึกเข้าคลังแล้ว: $name — แฟลชได้ที่หน้า FLASH⚡');
       } catch (e) {
         _snack('บันทึกไม่สำเร็จ: $e');
       }
@@ -4021,6 +4058,191 @@ class _TunePageState extends State<TunePage> {
   }
 
   // ----- 3D พรีวิว (หมุนรอบ) -----
+  // ----- 3D: แตะจุด = เลือก, ลากจุดขึ้น/ลง = แก้ค่า, แตะ 2 ครั้งแล้วลาก = เลือกคลุม -----
+  static int _ms() => DateTime.now().millisecondsSinceEpoch;
+
+  (List<List<double>>, double, double) _range3(XdfTable t) {
+    final v = s.values(t);
+    double lo = double.infinity, hi = double.negativeInfinity;
+    for (final row in v) {
+      for (final x in row) {
+        if (x.isNaN) continue;
+        if (x < lo) lo = x;
+        if (x > hi) hi = x;
+      }
+    }
+    if (!lo.isFinite) {
+      lo = 0;
+      hi = 1;
+    }
+    if (_fLo != null) {
+      lo = _fLo!;
+      hi = _fHi!;
+    }
+    return (v, lo, hi);
+  }
+
+  _Proj3 _proj3(XdfTable t, double lo, double hi) => _Proj3(_v3, t.rows, t.cols, lo, hi, yaw, pitch, zoom);
+
+  /// จุดบนผิว 3D ที่ใกล้นิ้วที่สุด (ในรัศมี 26px, ถ้าซ้อนกันเลือกจุดที่อยู่หน้าสุด)
+  (int, int)? _hit3(XdfTable t, Offset pos) {
+    if (_v3.isEmpty || t.rows < 2 || t.cols < 2) return null;
+    final (v, lo, hi) = _range3(t);
+    final P = _proj3(t, lo, hi);
+    (int, int)? best;
+    double bestD = -1e9;
+    for (int r = 0; r < t.rows; r++) {
+      for (int c = 0; c < t.cols; c++) {
+        if (v[r][c].isNaN) continue;
+        final q = P.pt(r.toDouble(), c.toDouble(), v[r][c]);
+        if ((q.$1 - pos).distance > 26) continue;
+        if (q.$2 > bestD) {
+          bestD = q.$2;
+          best = (r, c);
+        }
+      }
+    }
+    return best;
+  }
+
+  void _p3Down(PointerDownEvent e) {
+    _ptrs++;
+    if (_ptrs > 1) {
+      _dblArm = false;
+      return;
+    }
+    final now = _ms();
+    _dblArm = now - _tapUpMs < 320 && (e.localPosition - _tapUpPos).distance < 40;
+    _downMs = now;
+    _downPos = e.localPosition;
+  }
+
+  void _p3Up(PointerEvent e) {
+    _ptrs = math.max(0, _ptrs - 1);
+    if (e is! PointerUpEvent) return;
+    final now = _ms();
+    final tap = now - _downMs < 260 && (e.localPosition - _downPos).distance < 14;
+    if (!tap) return;
+    if (_dblArm) {
+      _tapUpMs = 0; // แตะ 2 ครั้งโดยไม่ลาก: ไม่ทำอะไร
+      _dblArm = false;
+      return;
+    }
+    _tapUpMs = now;
+    _tapUpPos = e.localPosition;
+    final t = s.table;
+    if (t == null) return;
+    final h = _hit3(t, e.localPosition);
+    if (h != null) {
+      _stopSpin();
+      setState(() {
+        a0 = h;
+        a1 = h;
+      });
+    }
+  }
+
+  void _s3Start(XdfTable t, ScaleStartDetails d) {
+    _stopSpin();
+    _zoom0 = zoom;
+    if (d.pointerCount > 1) {
+      _m3 = 1;
+      return;
+    }
+    if (_dblArm) {
+      _m3 = 3;
+      _boxA = d.localFocalPoint;
+      _boxB = d.localFocalPoint;
+      setState(() {});
+      return;
+    }
+    final h = _hit3(t, d.localFocalPoint);
+    if (h == null) {
+      _m3 = 1;
+      return;
+    }
+    if (t.isLock && !s.lockOk) {
+      _m3 = 0;
+      _canEdit(t);
+      return;
+    }
+    final g = _sel;
+    if (g == null || h.$1 < g.$1 || h.$1 > g.$3 || h.$2 < g.$2 || h.$2 > g.$4) {
+      a0 = h;
+      a1 = h;
+    }
+    final (_, lo, hi) = _range3(t);
+    _fLo = lo;
+    _fHi = hi;
+    _dragBase = {for (final rc in _cells) rc: s.val(t, rc.$1, rc.$2)};
+    _dragDy = 0;
+    _m3 = 2;
+    setState(() {});
+  }
+
+  void _s3Update(XdfTable t, ScaleUpdateDetails d) {
+    if (d.pointerCount > 1) {
+      setState(() => zoom = (_zoom0 * d.scale).clamp(0.4, 4.0).toDouble());
+      return;
+    }
+    switch (_m3) {
+      case 1:
+        setState(() {
+          yaw -= d.focalPointDelta.dx * 0.01;
+          pitch = (pitch + d.focalPointDelta.dy * 0.008).clamp(0.1, 1.5).toDouble();
+        });
+      case 2:
+        {
+        _dragDy += d.focalPointDelta.dy;
+        final lo = _fLo ?? 0, hi = _fHi ?? 1;
+        final span = hi > lo ? hi - lo : 1.0;
+        final px = _proj3(t, lo, hi).sc * _Proj3.zh * math.cos(pitch); // พิกเซลต่อความสูงแกน Z ทั้งแกน
+        if (px <= 0) return;
+        final dv = -_dragDy / px * span;
+        s.write(t, {for (final e in _dragBase.entries) e.key: e.value + dv}, 'ลากจุด 3D', merge: true);
+        }
+      case 3:
+        {
+        _boxB = d.localFocalPoint;
+        final a = _boxA!, b = _boxB!;
+        final rect = Rect.fromPoints(a, b);
+        final (v, lo, hi) = _range3(t);
+        final P = _proj3(t, lo, hi);
+        int r0 = 1 << 30, c0 = 1 << 30, r1 = -1, c1 = -1;
+        for (int r = 0; r < t.rows; r++) {
+          for (int c = 0; c < t.cols; c++) {
+            if (v[r][c].isNaN) continue;
+            if (!rect.contains(P.pt(r.toDouble(), c.toDouble(), v[r][c]).$1)) continue;
+            r0 = math.min(r0, r);
+            c0 = math.min(c0, c);
+            r1 = math.max(r1, r);
+            c1 = math.max(c1, c);
+          }
+        }
+        setState(() {
+          if (r1 >= 0) {
+            a0 = (r0, c0);
+            a1 = (r1, c1);
+          }
+        });
+        }
+    }
+  }
+
+  void _s3End() {
+    final dragged = _m3 == 2;
+    _m3 = 0;
+    _boxA = null;
+    _boxB = null;
+    _fLo = null;
+    _fHi = null;
+    _dragBase = {};
+    _dblArm = false;
+    _tapUpMs = 0;
+    if (mounted) setState(() {});
+    if (dragged && s.table != null && !s.tableDirty(s.table!)) _snack('ค่าไม่เปลี่ยน (น้อยกว่า 1 ขั้นของข้อมูล)');
+  }
+
   void _toggleSpin() {
     if (_spin != null) {
       _spin!.cancel();
@@ -4181,6 +4403,7 @@ class _TunePageState extends State<TunePage> {
               Opacity(opacity: can ? 1 : 0.4, child: StepBtn(label: '+', onStep: () => can ? _bump(1) : null, th: th)),
               const SizedBox(width: 4),
               _tb(th, const Text('%', style: TextStyle(fontSize: 15)), can ? _pct : null),
+              _tb(th, const Text('~', style: TextStyle(fontSize: 18)), can ? _avg : null),
               _tb(th, const Text('=', style: TextStyle(fontSize: 15)), can ? () => _setVal() : null),
               _sep(),
               _tb(th, Icon(Icons.undo, size: 18, color: th.c), s.undoList.isNotEmpty ? _undo : null),
@@ -4404,6 +4627,10 @@ class _TunePageState extends State<TunePage> {
       lo = 0;
       hi = 1;
     }
+    if (view3d && _fLo != null) {
+      lo = _fLo!;
+      hi = _fHi!;
+    }
     final lp = _livePos(t);
     final frame = BoxDecoration(
       color: const Color(0xCC060606),
@@ -4419,27 +4646,28 @@ class _TunePageState extends State<TunePage> {
           borderRadius: BorderRadius.circular(9),
           child: t.is2D
               ? Stack(children: [
-                  GestureDetector(
-                    onScaleStart: (_) {
-                      _zoom0 = zoom;
-                      _stopSpin();
-                    },
-                    onScaleUpdate: (d) => setState(() {
-                      if (d.pointerCount <= 1) {
-                        yaw -= d.focalPointDelta.dx * 0.01;
-                        pitch = (pitch + d.focalPointDelta.dy * 0.008).clamp(0.1, 1.5).toDouble();
-                      } else {
-                        zoom = (_zoom0 * d.scale).clamp(0.4, 4.0).toDouble();
-                      }
-                    }),
-                    onDoubleTap: _fit,
-                    child: CustomPaint(
-                      size: Size.infinite,
-                      painter: _SurfacePainter(
-                        v: v, lo: lo, hi: hi, yaw: yaw, pitch: pitch, zoom: zoom, lr: lp.$1, lc: lp.$2, th: th,
-                        rowL: rowL, colL: colL, t: t,
-                        xName: _axisName(t, true), yName: _axisName(t, false), zName: t.title,
-                      ),
+                  Listener(
+                    onPointerDown: _p3Down,
+                    onPointerUp: _p3Up,
+                    onPointerCancel: _p3Up,
+                    child: GestureDetector(
+                      onScaleStart: (d) => _s3Start(t, d),
+                      onScaleUpdate: (d) => _s3Update(t, d),
+                      onScaleEnd: (_) => _s3End(),
+                      child: LayoutBuilder(builder: (_, cs) {
+                        _v3 = Size(cs.maxWidth, cs.maxHeight);
+                        return CustomPaint(
+                          size: Size.infinite,
+                          painter: _SurfacePainter(
+                            v: v, lo: lo, hi: hi, yaw: yaw, pitch: pitch, zoom: zoom, lr: lp.$1, lc: lp.$2, th: th,
+                            rowL: rowL, colL: colL, t: t,
+                            xName: _axisName(t, true), yName: _axisName(t, false), zName: t.title,
+                            spin: _spin != null,
+                            sel: _sel,
+                            box: _boxA != null && _boxB != null ? Rect.fromPoints(_boxA!, _boxB!) : null,
+                          ),
+                        );
+                      }),
                     ),
                   ),
                   Positioned(
@@ -4450,7 +4678,7 @@ class _TunePageState extends State<TunePage> {
                       Row(mainAxisSize: MainAxisSize.min, children: [
                         Icon(_spin != null ? Icons.stop : Icons.threesixty, size: 16, color: th.c),
                         const SizedBox(width: 5),
-                        Text(_spin != null ? 'หยุด' : 'พรีวิว (หมุนรอบ)'),
+                        Text(_spin != null ? 'STOP' : 'PREVIEW'),
                       ]),
                       _toggleSpin,
                       active: _spin != null,
@@ -4745,8 +4973,7 @@ class _GridPainter extends CustomPainter {
         fill.color = col;
         canvas.drawRect(rect.deflate(cw > 16 ? 0.5 : 0.2), fill);
         if (showTxt) {
-          final dark = col.computeLuminance() > 0.42;
-          _TP.center(canvas, _TP.get(t.fmt(x), fs, dark ? const Color(0xFF101010) : Colors.white, maxW: cw), rect.center);
+          _TP.center(canvas, _TP.get(t.fmt(x), fs, const Color(0xFF000000), maxW: cw), rect.center);   // ตัวเลขสีดำทุกช่อง
         }
         if (s.cellChanged(t, r, c)) {
           canvas.drawPath(
@@ -4885,7 +5112,34 @@ class _ThumbPainter extends CustomPainter {
   bool shouldRepaint(_ThumbPainter o) => true;
 }
 
-// ---------- มุมมอง 3D แกน XYZ (ลากหมุน, 2 นิ้วซูม, แตะ 2 ครั้ง/FIT รีเซ็ต, ปุ่มพรีวิวหมุนรอบ) ----------
+// ---------- การฉายภาพ 3D (ใช้ร่วมกันระหว่างวาด และหาจุดที่นิ้วแตะ) ----------
+class _Proj3 {
+  static const zh = 1.5; // ความสูงแกน Z เทียบความกว้างฐาน
+  static const camD = 6.0; // ระยะกล้อง: มีระยะลึก ใกล้ใหญ่กว่า
+  final int nr, nc;
+  final double lo, span, sc, ox, oy, cyw, syw, cp, sp;
+  _Proj3(Size size, this.nr, this.nc, this.lo, double hi, double yaw, double pitch, double zoom)
+      : span = hi > lo ? hi - lo : 1.0,
+        sc = math.min(size.width * 0.36, size.height * 0.72) * zoom,
+        ox = size.width * 0.50,
+        oy = size.height * 0.56,
+        cyw = math.cos(yaw),
+        syw = math.sin(yaw),
+        cp = math.cos(pitch),
+        sp = math.sin(pitch);
+
+  (Offset, double) pt(double r, double c, double val) {
+    final x = nc > 1 ? c / (nc - 1) * 2 - 1 : 0.0;
+    final y = nr > 1 ? r / (nr - 1) * 2 - 1 : 0.0;
+    final z = ((val - lo) / span - 0.5) * zh;
+    final xr = x * cyw - y * syw, yr = x * syw + y * cyw;
+    final depth = yr * cp + z * sp;
+    final k = camD / (camD - depth);
+    return (Offset(ox + xr * sc * k, oy + (yr * sp - z * cp) * sc * k), depth);
+  }
+}
+
+// ---------- มุมมอง 3D แกน XYZ (ลากหมุน, ลากจุดแก้ค่า, แตะ 2 ครั้งแล้วลาก = เลือกคลุม, 2 นิ้วซูม, PREVIEW หมุนรอบ) ----------
 class _SurfacePainter extends CustomPainter {
   final List<List<double>> v;
   final double lo, hi, yaw, pitch, zoom;
@@ -4894,7 +5148,13 @@ class _SurfacePainter extends CustomPainter {
   final List<String> rowL, colL;
   final String xName, yName, zName;
   final XdfTable t;
+  final bool spin; // PREVIEW กำลังหมุน: ซ่อนเส้นแกน Z และตัวเลขแกน x y z
+  final (int, int, int, int)? sel; // ช่องที่เลือก (r0,c0,r1,c1)
+  final Rect? box; // กรอบลากคลุม
   _SurfacePainter({
+    this.spin = false,
+    this.sel,
+    this.box,
     required this.v, required this.lo, required this.hi, required this.yaw, required this.pitch, required this.zoom,
     required this.lr, required this.lc, required this.th, required this.rowL, required this.colL,
     required this.xName, required this.yName, required this.zName, required this.t,
@@ -4906,23 +5166,9 @@ class _SurfacePainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final nr = v.length, nc = v[0].length;
     if (nr < 2 || nc < 2) return;
-    final sc = math.min(size.width * 0.36, size.height * 0.72) * zoom;
-    final ox = size.width * 0.50, oy = size.height * 0.56;
-    final cyw = math.cos(yaw), syw = math.sin(yaw), cp = math.cos(pitch), sp = math.sin(pitch);
-    final span = hi > lo ? hi - lo : 1.0;
-    const zh = 1.15; // ความสูงแกน Z เทียบความกว้างฐาน
-
-    // มุมมองแบบมีระยะลึก: ส่วนที่อยู่ใกล้ใหญ่กว่า -> ตอนหมุนพรีวิวเห็นชัดว่าหมุนรอบ ไม่ดูเหมือนแกว่งไป-กลับ
-    const camD = 6.0;
-    (Offset, double) pt(double r, double c, double val) {
-      final x = c / (nc - 1) * 2 - 1;
-      final y = r / (nr - 1) * 2 - 1;
-      final z = ((val - lo) / span - 0.5) * zh;
-      final xr = x * cyw - y * syw, yr = x * syw + y * cyw;
-      final depth = yr * cp + z * sp;
-      final k = camD / (camD - depth);
-      return (Offset(ox + xr * sc * k, oy + (yr * sp - z * cp) * sc * k), depth);
-    }
+    final P = _Proj3(size, nr, nc, lo, hi, yaw, pitch, zoom);
+    final span = P.span;
+    (Offset, double) pt(double r, double c, double val) => P.pt(r, c, val);
 
     // พื้นฐาน + เส้นตาราง
     final gl = Paint()
@@ -4958,9 +5204,9 @@ class _SurfacePainter extends CustomPainter {
     final zp = Paint()
       ..color = cZ.withOpacity(0.7)
       ..strokeWidth = 1.3;
-    canvas.drawLine(zb, zt, zp);
+    if (!spin) canvas.drawLine(zb, zt, zp);
     final zdec = math.min(t.dec, 2).clamp(0, 2).toInt();
-    for (int k = 0; k <= 5; k++) {
+    for (int k = 0; k <= 5 && !spin; k++) {
       final val = lo + span * k / 5;
       final p = pt(zc.$1, zc.$2, val).$1;
       canvas.drawLine(p, p + const Offset(-6, 0), zp);
@@ -5003,17 +5249,44 @@ class _SurfacePainter extends CustomPainter {
       canvas.drawPath(q.$2, edge);
     }
 
+    // จุดที่เลือก
+    final g = sel;
+    if (g != null && !spin) {
+      final dotF = Paint()..color = Colors.white;
+      final dotS = Paint()
+        ..color = th.c
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.6;
+      final rad = (g.$3 - g.$1 + 1) * (g.$4 - g.$2 + 1) > 120 ? 2.4 : 3.6;
+      for (int r = g.$1; r <= g.$3 && r < nr; r++) {
+        for (int c = g.$2; c <= g.$4 && c < nc; c++) {
+          if (v[r][c].isNaN) continue;
+          final p = pt(r.toDouble(), c.toDouble(), v[r][c]).$1;
+          canvas.drawCircle(p, rad, dotF);
+          canvas.drawCircle(p, rad, dotS);
+        }
+      }
+    }
+    final bx = box;
+    if (bx != null) {
+      canvas.drawRect(bx, Paint()..color = th.c.withOpacity(0.15));
+      canvas.drawRect(bx, Paint()
+        ..color = th.c
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.2);
+    }
+
     // แกน X (คอลัมน์) ตามขอบหน้า และแกน Y (แถว) ตามขอบข้างที่ใกล้ผู้ชม
     final rF = pt(0, (nc - 1) / 2, lo).$2 > pt(nr - 1.0, (nc - 1) / 2, lo).$2 ? 0.0 : nr - 1.0;
     final cF = pt((nr - 1) / 2, 0, lo).$2 > pt((nr - 1) / 2, nc - 1.0, lo).$2 ? 0.0 : nc - 1.0;
     final orr = math.max(0.9, (nr - 1) * 0.07), occ = math.max(0.9, (nc - 1) * 0.07);
     final rL = rF == 0 ? -orr : rF + orr, rT = rF == 0 ? -orr * 2.6 : rF + orr * 2.6;
     final cL = cF == 0 ? -occ : cF + occ, cT = cF == 0 ? -occ * 2.8 : cF + occ * 2.8;
-    for (int c = 0; c < nc; c += stc) {
+    for (int c = 0; c < nc && !spin; c += stc) {
       _TP.center(canvas, _TP.get(c < colL.length ? colL[c] : '', 11, cX), pt(rL, c.toDouble(), lo).$1);
     }
     _TP.center(canvas, _TP.get(xName, 12, cX, bold: true, maxW: 200), pt(rT, (nc - 1) / 2, lo).$1);
-    for (int r = 0; r < nr; r += str) {
+    for (int r = 0; r < nr && !spin; r += str) {
       _TP.center(canvas, _TP.get(r < rowL.length ? rowL[r] : '', 11, cY), pt(r.toDouble(), cL, lo).$1);
     }
     _TP.center(canvas, _TP.get(yName, 12, cY, bold: true, maxW: 200), pt((nr - 1) / 2, cT, lo).$1);
@@ -5052,8 +5325,10 @@ class _SurfacePainter extends CustomPainter {
     tl.paint(canvas, Offset(lg.left, lg.bottom + 5));
     tm.paint(canvas, Offset(lg.center.dx - tm.width / 2, lg.bottom + 5));
     tr.paint(canvas, Offset(lg.right - tr.width, lg.bottom + 5));
-    final hint = _TP.get('ลาก = หมุน · 2 นิ้ว = ซูม · แตะ 2 ครั้ง = รีเซ็ต', 9.5, Colors.white30);
-    hint.paint(canvas, Offset(size.width - hint.width - 10, 8));
+    if (!spin) {
+      final hint = _TP.get('ลากที่ว่าง = หมุน · ลากจุดขึ้น/ลง = แก้ค่า · แตะ 2 ครั้งแล้วลาก = เลือกคลุม · 2 นิ้ว = ซูม · FIT = รีเซ็ต', 9.5, Colors.white30);
+      hint.paint(canvas, Offset(size.width - hint.width - 10, 8));
+    }
   }
 
   @override
