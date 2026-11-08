@@ -3341,14 +3341,40 @@ class _TP {
 
 // ---------- ไฟล์ต้นฉบับ (ORIGINAL) ที่มากับแอพ : app/assets/original/ ----------
 class OrigPack {
-  final String name, bin, xdf;
-  const OrigPack(this.name, this.bin, this.xdf);
+  final String name, bin, xdf, model;
+  final List<int>? ecuId; // 5 ไบต์ ID กล่อง สำหรับจับคู่ "ไฟล์สำหรับรถคันนี้" (null = ยังไม่ระบุ)
+  final int binKb, xdfKb;
+  const OrigPack(this.name, this.bin, this.xdf, {this.model = '', this.ecuId, this.binKb = 0, this.xdfKb = 0});
   String get binName => bin.split('/').last;
   String get xdfName => xdf.split('/').last;
+  // ตรงกับ ID กล่องที่ต่ออยู่หรือไม่
+  bool matches(List<int>? ecm) {
+    if (ecuId == null || ecm == null || ecuId!.length != ecm.length) return false;
+    for (int i = 0; i < ecm.length; i++) {
+      if (ecuId![i] != ecm[i]) return false;
+    }
+    return true;
+  }
+}
+
+// ID กล่อง (5 ไบต์) -> ชื่อรุ่น  (คีย์เป็นเลขฐาน 16 เว้นวรรค ตัวใหญ่) ; เติมรุ่นอื่นเมื่อได้ ID จริง
+const kEcuModels = <String, String>{
+  '01 01 88 0D 01': 'Wave110i (2013–2017)',
+};
+String ecmHex(List<int>? e) => e == null ? '' : e.map((x) => x.toRadixString(16).padLeft(2, '0').toUpperCase()).join(' ');
+String? ecuModelName(List<int>? e) {
+  if (e == null) return null;
+  final m = kEcuModels[ecmHex(e)];
+  if (m != null) return m;
+  for (final o in kOriginals) {
+    if (o.matches(e) && o.model.isNotEmpty) return o.model;
+  }
+  return null;
 }
 
 const kOriginals = <OrigPack>[
-  OrigPack('K03-H01', 'assets/original/K03-H01.bin', 'assets/original/K03-H01.xdf'),
+  OrigPack('K03-H01', 'assets/original/K03-H01.bin', 'assets/original/K03-H01.xdf',
+      model: 'Wave110i (2013–2017)', ecuId: [0x01, 0x01, 0x88, 0x0D, 0x01], binKb: 64, xdfKb: 17),
 ];
 
 /// เลือกไฟล์จากเครื่องเฉพาะนามสกุลที่กำหนด (bin / xdf) ; คืน (ชื่อไฟล์, ไบต์) หรือ null
@@ -3917,6 +3943,9 @@ class TunePage extends StatefulWidget {
 class _TunePageState extends State<TunePage> {
   final s = TuneSession.i;
   GaugeController get c => widget.c;
+
+  // สถานะกาง/พับแต่ละหมวดของเมนูตารางจูน — จำไว้ข้ามการเปิดเมนู (ผู้ใช้กดพับไว้ ครั้งหน้าก็ยังพับ)
+  bool _mnF = false, _mn2 = true, _mn1 = false;
 
   // ตาราง 2D
   double cw = 54, ch = 24, sx = 0, sy = 0;
@@ -4597,29 +4626,205 @@ class _TunePageState extends State<TunePage> {
     }
   }
 
-  /// เลือก BIN + XDF ต้นฉบับ (ORIGINAL) ที่มากับแอพ
+  /// เลือก BIN + XDF ต้นฉบับ (ORIGINAL) ที่มากับแอพ — จับคู่ตาม ID กล่อง, ไม่แฟลชอัตโนมัติ
   Future<void> _openOriginals() async {
     final th = Cfg.i.t;
+    final ecm = c.t.fl?.ecm; // ID กล่องที่ต่ออยู่ (null = ยังไม่ต่อ/ยังอ่านไม่ได้)
     final p = await showDialog<OrigPack>(
       context: context,
-      builder: (dctx) => AlertDialog(
-        backgroundColor: const Color(0xFF14141A),
-        title: Text('เลือก BIN/XDF จากแอป (ORIGINAL)', style: TextStyle(fontSize: 15, color: th.c)),
-        content: SizedBox(
-          width: 460,
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            for (final o in kOriginals)
-              ListTile(
-                leading: Icon(Icons.memory, color: th.c),
-                title: Text(o.name, style: const TextStyle(fontWeight: FontWeight.bold)),
-                subtitle: Text('${o.binName}\n${o.xdfName}', style: const TextStyle(fontSize: 11)),
-                isThreeLine: true,
-                onTap: () => Navigator.of(dctx).pop(o),
+      barrierColor: Colors.black54,
+      builder: (dctx) {
+        int tab = (ecm != null && kOriginals.any((o) => o.matches(ecm))) ? 0 : 1; // มีไฟล์ตรงรุ่น -> เปิดแท็บรถคันนี้
+        bool searching = false;
+        String q = '';
+        final qCtl = TextEditingController();
+        return StatefulBuilder(builder: (dctx, setM) {
+          final sz = MediaQuery.of(dctx).size;
+          // รายการตามแท็บ
+          List<OrigPack> list = tab == 0
+              ? [for (final o in kOriginals) if (o.matches(ecm)) o]
+              : List<OrigPack>.from(kOriginals);
+          if (q.trim().isNotEmpty) {
+            final k = q.trim().toLowerCase();
+            list = [for (final o in list) if (('${o.model} ${o.name} ${ecmHex(o.ecuId)}').toLowerCase().contains(k)) o];
+          }
+          list.sort((a, b) => (a.model.isEmpty ? a.name : a.model).compareTo(b.model.isEmpty ? b.name : b.model)); // เรียงตามรุ่นรถ
+
+          Widget hbtn(IconData ic, Color bc, Color fc, VoidCallback onTap) => InkWell(
+                onTap: onTap,
+                borderRadius: BorderRadius.circular(12),
+                child: Container(
+                  width: 46,
+                  height: 46,
+                  decoration: BoxDecoration(color: const Color(0xFF12161C), border: Border.all(color: bc), borderRadius: BorderRadius.circular(12)),
+                  child: Icon(ic, color: fc, size: 20),
+                ),
+              );
+          Widget tabBtn(String t, int i) => Expanded(
+                child: InkWell(
+                  onTap: () => setM(() => tab = i),
+                  borderRadius: BorderRadius.circular(12),
+                  child: Container(
+                    height: 46,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: tab == i ? th.c.withOpacity(0.18) : const Color(0xFF12161C),
+                      border: Border.all(color: tab == i ? th.c : Colors.white24, width: tab == i ? 1.4 : 1),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text(t, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: tab == i ? Colors.white : Colors.white60)),
+                  ),
+                ),
+              );
+          Widget card(OrigPack o) {
+            final on = o.matches(ecm);
+            return InkWell(
+              onTap: () => Navigator.of(dctx).pop(o),
+              borderRadius: BorderRadius.circular(14),
+              child: Container(
+                margin: const EdgeInsets.only(bottom: 9),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                decoration: BoxDecoration(
+                  color: on ? const Color(0xFF0E1D16) : const Color(0xFF0F1013),
+                  border: Border.all(color: on ? kGreen.withOpacity(0.7) : Colors.white12),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Row(children: [
+                  Expanded(
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      RichText(
+                        text: TextSpan(style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white), children: [
+                          TextSpan(text: o.model.isEmpty ? o.name : o.model.split(' (').first),
+                          TextSpan(text: '  ${o.name}', style: const TextStyle(fontSize: 14, color: Colors.white70, fontFeatures: [FontFeature.tabularFigures])),
+                        ]),
+                      ),
+                      const SizedBox(height: 3),
+                      Text('BIN ${o.binKb} KB · XDF ${o.xdfKb} KB', style: const TextStyle(fontSize: 12.5, color: Colors.white54)),
+                    ]),
+                  ),
+                  if (o.ecuId != null)
+                    Container(
+                      margin: const EdgeInsets.only(left: 8),
+                      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+                      decoration: BoxDecoration(
+                        border: Border.all(color: on ? kGreen.withOpacity(0.7) : Colors.white24),
+                        borderRadius: BorderRadius.circular(7),
+                      ),
+                      child: Text(ecmHex(o.ecuId), style: TextStyle(fontSize: 11, color: on ? kGreen : Colors.white54)),
+                    ),
+                  Padding(
+                    padding: const EdgeInsets.only(left: 6),
+                    child: Icon(on ? Icons.check : Icons.chevron_right, color: on ? kGreen : th.c, size: 20),
+                  ),
+                ]),
               ),
-          ]),
-        ),
-        actions: [TextButton(onPressed: () => Navigator.of(dctx).pop(), child: const Text('ปิด'))],
-      ),
+            );
+          }
+
+          return Dialog(
+            backgroundColor: const Color(0xFF0C0D10),
+            insetPadding: EdgeInsets.symmetric(horizontal: sz.width * 0.1, vertical: 26),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: BorderSide(color: th.c, width: 1.2)),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              // หัว
+              Container(
+                padding: const EdgeInsets.fromLTRB(20, 16, 20, 14),
+                decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: Color(0xFF1A1114)))),
+                child: Row(children: [
+                  Container(
+                    width: 50,
+                    height: 50,
+                    decoration: BoxDecoration(color: const Color(0xFF15090B), border: Border.all(color: th.c), borderRadius: BorderRadius.circular(14)),
+                    child: Icon(Icons.memory, color: th.c, size: 24),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      const Text('เลือก BIN/XDF จากแอป', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
+                      const SizedBox(height: 2),
+                      RichText(
+                        text: const TextSpan(style: TextStyle(fontSize: 12.5, color: Colors.white60), children: [
+                          TextSpan(text: 'จับคู่เฉพาะรหัส ECU ที่ยืนยันได้ · '),
+                          TextSpan(text: 'ไม่แฟลชอัตโนมัติ', style: TextStyle(color: Color(0xFFFF7A7C), fontWeight: FontWeight.w600)),
+                        ]),
+                      ),
+                    ]),
+                  ),
+                  hbtn(searching ? Icons.search_off : Icons.search, Colors.white24, Colors.white70, () => setM(() {
+                        searching = !searching;
+                        if (!searching) {
+                          q = '';
+                          qCtl.clear();
+                        }
+                      })),
+                  const SizedBox(width: 8),
+                  hbtn(Icons.close, th.c, const Color(0xFFFF6B6E), () => Navigator.of(dctx).pop()),
+                ]),
+              ),
+              // แท็บ
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 14, 20, 8),
+                child: Row(children: [tabBtn('ไฟล์สำหรับรถคันนี้', 0), const SizedBox(width: 12), tabBtn('ไฟล์ทั้งหมด', 1)]),
+              ),
+              // ช่องค้นหา (เมื่อเปิด)
+              if (searching)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 6),
+                  child: TextField(
+                    controller: qCtl,
+                    autofocus: true,
+                    style: const TextStyle(fontSize: 14),
+                    onChanged: (v) => setM(() => q = v),
+                    decoration: InputDecoration(
+                      isDense: true,
+                      hintText: 'ค้นหารุ่น / รหัส ECU',
+                      prefixIcon: const Icon(Icons.search, size: 18),
+                      filled: true,
+                      fillColor: const Color(0xFF12161C),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: th.c.withOpacity(0.5))),
+                      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: Colors.white24)),
+                    ),
+                  ),
+                ),
+              // บรรทัดสรุป + สถานะการต่อ
+              Padding(
+                padding: const EdgeInsets.fromLTRB(22, 2, 22, 10),
+                child: Row(children: [
+                  Expanded(child: Text('แสดง ${list.length}/${kOriginals.length} ชุด · เรียงตาม รุ่นรถ', style: const TextStyle(fontSize: 13, color: Colors.white54))),
+                  Text(
+                    ecm != null ? '● ต่อ ECU: ${ecuModelName(ecm) ?? 'ไม่ทราบรุ่น'} · ${ecmHex(ecm)}' : '● ยังไม่เชื่อมต่อ ECU',
+                    style: TextStyle(fontSize: 12.5, color: ecm != null ? kGreen : Colors.white38),
+                  ),
+                ]),
+              ),
+              // รายการ
+              Flexible(
+                child: list.isEmpty
+                    ? Padding(
+                        padding: const EdgeInsets.fromLTRB(20, 24, 20, 40),
+                        child: Column(mainAxisSize: MainAxisSize.min, children: [
+                          Icon(tab == 0 ? Icons.usb_off : Icons.folder_off, color: Colors.white24, size: 40),
+                          const SizedBox(height: 12),
+                          Text(
+                            tab == 0
+                                ? (ecm == null ? 'กรุณาเชื่อมต่อ ECU แล้วกดสแกน ECU\nหรือแตะ "ไฟล์ทั้งหมด" เพื่อดูทุกชุด' : 'ยังไม่มีไฟล์ในแอปที่ตรงกับ ID กล่องนี้\n(${ecmHex(ecm)})')
+                                : (q.trim().isEmpty ? 'ยังไม่มีไฟล์ฝังในแอป' : 'ไม่พบไฟล์ที่ค้นหา'),
+                            textAlign: TextAlign.center,
+                            style: const TextStyle(fontSize: 14, color: Colors.white54, height: 1.5),
+                          ),
+                          if (tab == 0)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 14),
+                              child: TextButton(onPressed: () => setM(() => tab = 1), child: Text('ดูไฟล์ทั้งหมด ›', style: TextStyle(color: th.c2))),
+                            ),
+                        ]),
+                      )
+                    : ListView(padding: const EdgeInsets.fromLTRB(20, 2, 20, 16), shrinkWrap: true, children: [for (final o in list) card(o)]),
+              ),
+            ]),
+          );
+        });
+      },
     );
     if (p == null || !mounted) return;
     if (_hasEdits && !await _confirm('เปิดไฟล์ ORIGINAL', 'ค่าที่แก้ใน BIN ปัจจุบันจะหายไป', ok: 'เปิด ${p.name}')) return;
@@ -5572,7 +5777,6 @@ class _TunePageState extends State<TunePage> {
     final box = _tblKey.currentContext?.findRenderObject() as RenderBox?;
     final pos = box?.localToGlobal(Offset.zero) ?? const Offset(150, 40);
     final top = pos.dy + (box?.size.height ?? 34) + 6;
-    bool openF = false, open2 = true, open1 = false;
     final picked = await showGeneralDialog<int>(
       context: context,
       barrierDismissible: true,
@@ -5582,7 +5786,7 @@ class _TunePageState extends State<TunePage> {
       transitionBuilder: (_, a, __, child) => FadeTransition(opacity: CurvedAnimation(parent: a, curve: Curves.easeOut), child: child),
       pageBuilder: (dctx, _, __) {
         final sz = MediaQuery.of(dctx).size;
-        final w = math.min(440.0, sz.width - 16);
+        final w = math.min(300.0, sz.width - 16);
         final left = pos.dx.clamp(8.0, math.max(8.0, sz.width - w - 8)).toDouble();
         return Stack(children: [
           Positioned(
@@ -5600,7 +5804,7 @@ class _TunePageState extends State<TunePage> {
                         borderRadius: BorderRadius.circular(12),
                         child: Container(
                           margin: const EdgeInsets.only(bottom: 5),
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                           decoration: BoxDecoration(
                             color: Colors.white.withOpacity(0.05),
                             borderRadius: BorderRadius.circular(12),
@@ -5673,8 +5877,8 @@ class _TunePageState extends State<TunePage> {
 
                 final items2 = [for (int i = 0; i < d.tables.length; i++) if (d.tables[i].is2D) i];
                 final items1 = [for (int i = 0; i < d.tables.length; i++) if (!d.tables[i].is2D) i];
-                return ListView(padding: const EdgeInsets.all(10), children: [
-                  section(Icons.flag_outlined, 'FLAGS', d.flags.length, openF, () => setM(() => openF = !openF), [
+                return ListView(padding: const EdgeInsets.all(8), children: [
+                  section(Icons.flag_outlined, 'FLAGS', d.flags.length, _mnF, () => setM(() => _mnF = !_mnF), [
                     for (final f in d.flags)
                       Opacity(
                         opacity: f.valid ? 1 : 0.4,
@@ -5706,10 +5910,10 @@ class _TunePageState extends State<TunePage> {
                         ),
                       ),
                   ]),
-                  section(Icons.grid_on, 'ตารางจูน', items2.length, open2, () => setM(() => open2 = !open2), [
+                  section(Icons.grid_on, 'ตารางจูน', items2.length, _mn2, () => setM(() => _mn2 = !_mn2), [
                     for (final i in items2) tile(i, const SizedBox.shrink(), ''), // แค่ชื่อตาราง (ไม่มีภาพย่อ / สูตร)
                   ]),
-                  section(Icons.linear_scale, 'ค่า / แกน 1 มิติ', items1.length, open1, () => setM(() => open1 = !open1), [
+                  section(Icons.linear_scale, 'ค่า / แกน 1 มิติ', items1.length, _mn1, () => setM(() => _mn1 = !_mn1), [
                     for (final i in items1)
                       tile(i, Icon(d.tables[i].rows * d.tables[i].cols == 1 ? Icons.tag : Icons.linear_scale, size: 18, color: th.c2), preview(d.tables[i])),
                   ]),
@@ -6850,8 +7054,11 @@ class _FlashPageState extends State<FlashPage> {
         const SizedBox(height: 4),
         _row('หน้าเกจ', gaugeTxt, col: gaugeCol),
         if (f != null && f.prep) ...[
-          _row('กล่อง ECU', '${flashEcuText(f.ecu)}${f.ecm != null ? '  ·  ID ${f.ecm!.map((x) => x.toRadixString(16).padLeft(2, '0').toUpperCase()).join(' ')}' : ''}',
+          _row('กล่อง ECU', '${flashEcuText(f.ecu)}${f.ecm != null ? '  ·  ID ${ecmHex(f.ecm)}' : ''}',
               col: (f.ecu == 2 || f.ecu == 3) ? kGreen : ((f.ecu == 5 || f.ecu == 6) ? kAmber : Colors.white70)),
+          if (f.ecm != null)
+            _row('รุ่น', ecuModelName(f.ecm) ?? 'ไม่ทราบรุ่น (ID ${ecmHex(f.ecm)})',
+                col: ecuModelName(f.ecm) != null ? th.c2 : Colors.white54),
           _row('ไฟล์ในเกจ',
               f.fileSize > 0 ? '${(f.fileSize / 1024).toStringAsFixed(1)} KB · sum ${_hx(f.fileSum, 4)}${onGauge ? ' (ตรงกับไฟล์ที่เลือก)' : ''}' : 'ยังไม่มี'),
           _row('FLASHCOUNT', f.count == null ? '-- (อ่านได้เมื่อกล่องอยู่สถานะ OK)' : '${f.count}${f.phase == 9 && f.count0 != null && f.count! > f.count0! ? '  (เดิม ${f.count0} → แฟลชเข้ากล่องแล้ว ✓)' : ''}',
