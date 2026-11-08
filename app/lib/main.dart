@@ -198,10 +198,11 @@ class FlashStat {
   final int phase, ecu, err, pct, fileSize, fileSum, fileCk8, done, total, elapsed, eta, recv;
   final double? batt;
   final List<int>? ecm;
+  final int? count, count0; // FLASHCOUNT จากกล่อง / ค่าก่อนกด FLASH (null = ยังอ่านไม่ได้, FW 1.0.10)
   const FlashStat({
     required this.prep, required this.phase, required this.ecu, required this.err, required this.pct,
     required this.fileSize, required this.fileSum, required this.fileCk8, required this.done, required this.total,
-    required this.elapsed, required this.eta, required this.recv, this.batt, this.ecm,
+    required this.elapsed, required this.eta, required this.recv, this.batt, this.ecm, this.count, this.count0,
   });
   bool get busy => phase >= 4 && phase <= 8;
 
@@ -215,6 +216,8 @@ class FlashStat {
       done: d.getUint32(48, Endian.little), total: d.getUint32(52, Endian.little),
       elapsed: d.getUint16(56, Endian.little), eta: d.getUint16(58, Endian.little),
       ecm: b[65] != 0 ? b.sublist(60, 65) : null, recv: d.getUint32(66, Endian.little),
+      count: b.length >= 72 && b[70] != 0xFF ? b[70] : null,
+      count0: b.length >= 72 && b[71] != 0xFF ? b[71] : null,
     );
   }
 }
@@ -6058,6 +6061,8 @@ class _FlashPageState extends State<FlashPage> {
               col: (f.ecu == 2 || f.ecu == 3) ? kGreen : ((f.ecu == 5 || f.ecu == 6) ? kAmber : Colors.white70)),
           _row('ไฟล์ในเกจ',
               f.fileSize > 0 ? '${(f.fileSize / 1024).toStringAsFixed(1)} KB · sum ${_hx(f.fileSum, 4)}${onGauge ? ' (ตรงกับไฟล์ที่เลือก)' : ''}' : 'ยังไม่มี'),
+          _row('FLASHCOUNT', f.count == null ? '-- (อ่านได้เมื่อกล่องอยู่สถานะ OK)' : '${f.count}${f.phase == 9 && f.count0 != null && f.count! > f.count0! ? '  (เดิม ${f.count0} → แฟลชเข้ากล่องแล้ว ✓)' : ''}',
+              col: f.count == null ? Colors.white54 : (f.phase == 9 && f.count0 != null && f.count! > f.count0! ? kGreen : Colors.white)),
           if (f.batt != null) _row('แบต (ล่าสุด)', '${f.batt!.toStringAsFixed(1)} V', col: f.batt! < 12.0 ? kAmber : Colors.white),
         ],
         const Divider(color: Colors.white12, height: 16),
