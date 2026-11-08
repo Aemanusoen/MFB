@@ -3782,8 +3782,7 @@ class _TunePageState extends State<TunePage> {
         builder: (dctx) => AlertDialog(
           backgroundColor: const Color(0xFF14141A),
           title: const Text('ปิดตารางจูน', style: TextStyle(fontSize: 16)),
-          content: Text('ตาราง "${t.title}" มีค่าที่แก้แต่ยังไม่ได้บันทึก
-ต้องการบันทึกก่อนปิดหรือไม่?'),
+          content: Text('ตาราง "${t.title}" มีค่าที่แก้แต่ยังไม่ได้บันทึก\nต้องการบันทึกก่อนปิดหรือไม่?'),
           actions: [
             TextButton(onPressed: () => Navigator.of(dctx).pop(0), child: const Text('ยกเลิก')),
             TextButton(onPressed: () => Navigator.of(dctx).pop(1), child: const Text('ไม่บันทึก', style: TextStyle(color: kBad))),
