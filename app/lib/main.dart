@@ -774,17 +774,19 @@ class GaugeController extends ChangeNotifier {
   }
 
   /// ส่งไฟล์ BIN ไปเก็บในเกจ (เกจต้องอยู่หน้าเตรียมแฟลช) คืนค่า null = สำเร็จ, ข้อความ = error
-  Future<String?> sendBin(Uint8List data, void Function(double) onProgress) async {
+  Future<String?> sendBin(Uint8List data, void Function(double) onProgress, {String name = ''}) async {
     final ch = _imgCh;
     if (ch == null || link != LinkState.connected || _dev == null) return 'ยังไม่ได้เชื่อมต่อเกจ';
     final f0 = t.fl;
-    if (f0 == null) return 'เฟิร์มแวร์เกจยังไม่รองรับการแฟลช (ต้อง FW 1.0.9 ขึ้นไป)';
+    if (f0 == null) return 'เฟิร์มแวร์เกจยังไม่รองรับการแฟลช (ต้อง FW 1.0.10 ขึ้นไป)';
     if (!f0.prep) return 'เกจยังไม่อยู่หน้าเตรียมแฟลช';
     _logoBusy = true;
     try {
       final chunk = (_dev!.mtuNow - 4).clamp(16, 200).toInt();
       final n = data.length;
-      await ch.write([0x21, n & 255, (n >> 8) & 255, (n >> 16) & 255, (n >> 24) & 255]);
+      // ชื่อไฟล์ (ASCII เท่านั้น สูงสุด 32 ตัว) ให้เกจแสดง
+      final nm = [for (final u in name.codeUnits) (u >= 0x20 && u < 0x7F) ? u : 0x5F].take(32).toList();
+      await ch.write([0x21, n & 255, (n >> 8) & 255, (n >> 16) & 255, (n >> 24) & 255, ...nm]);
       int sum = 0;
       bool sawRecv = false;
       for (int off = 0; off < n; off += chunk) {
@@ -804,7 +806,7 @@ class GaugeController extends ChangeNotifier {
       for (int i = 0; i < 60; i++) {
         await Future.delayed(const Duration(milliseconds: 100));
         final f = t.fl;
-        if (f != null && f.phase != 2 && f.fileSize == n && f.fileSum == sum && f.fileCk8 == 0) return null;
+        if (f != null && f.phase != 2 && f.fileSize == n && f.fileSum == sum) return null;
         if (f != null && f.phase != 2 && f.err != 0) return 'เกจรับไฟล์ไม่สำเร็จ: ${flashErrText(f.err)}';
       }
       return 'ไม่ได้รับการยืนยันจากเกจ';
@@ -812,23 +814,6 @@ class GaugeController extends ChangeNotifier {
       return 'ส่งไม่สำเร็จ: $e';
     } finally {
       _logoBusy = false;
-    }
-  }
-
-  /// สั่งเกจเริ่มแฟลช [0x10][u32 offset][u32 size][u16 sum16]
-  Future<String?> startFlash(int offset, int size, int sum16) async {
-    final c = _cmd;
-    if (c == null || link != LinkState.connected) return 'ยังไม่ได้เชื่อมต่อเกจ';
-    final b = ByteData(11)
-      ..setUint8(0, 0x10)
-      ..setUint32(1, offset, Endian.little)
-      ..setUint32(5, size, Endian.little)
-      ..setUint16(9, sum16 & 0xFFFF, Endian.little);
-    try {
-      await c.write(b.buffer.asUint8List(), withoutResponse: false);
-      return null;
-    } catch (e) {
-      return 'ส่งคำสั่งไม่สำเร็จ: $e';
     }
   }
 
@@ -4012,7 +3997,7 @@ class _TunePageState extends State<TunePage> {
                   style: const TextStyle(fontSize: 12.5)),
               box(kAmber, 'CHECKSUM (ไม่แก้อัตโนมัติ)',
                   'ผลรวมไบต์ของไฟล์ตอนนี้ = 0x${sum8.toRadixString(16).toUpperCase().padLeft(2, '0')}${sum8 == 0 ? ' (ผ่าน)' : ' (ยังไม่ผ่าน)'}\n'
-                      'ใส่ Start Offset และตำแหน่ง checksum (Fix) ตอนกดแฟลชในหน้า FLASH⚡ หรือในโปรแกรมแฟลชที่ใช้'),
+                      'เกจเลือก Start Offset และแก้ checksum ให้เองตามขนาดไฟล์ ตอนกด FLASH ที่เกจ (ตอนนี้รองรับ 48 KB และ 64 KB)'),
               if (locks.isEmpty)
                 box(Colors.white38, 'รหัสล็อคกล่อง', 'ไม่ได้เปลี่ยน')
               else
@@ -5390,8 +5375,9 @@ class _BarsPainter extends CustomPainter {
 // ===================== คลังไฟล์ BIN + หน้า FLASH ECU ====================
 // =====================================================================
 // คลังไฟล์: เก็บในพื้นที่ของแอพ (Documents/bin_lib/<ชื่อ>.bin + index.json) ตั้งชื่อเองได้
-// หน้า FLASH: เลือกไฟล์จากคลัง -> ใส่ Start Offset + ตำแหน่ง checksum (Fix) ตอนกดแฟลช -> ส่งไฟล์ไปเกจ -> เกจแฟลชเอง
-// เกจต้องเปิดหน้าเตรียมแฟลชอยู่ (SETUP > CONNECT APP > ECU FLASH) ถึงจะรับไฟล์/เริ่มแฟลชได้ (FW 1.0.9 ขึ้นไป)
+// หน้า FLASH: เลือกไฟล์จากคลัง -> ส่งไฟล์ไปเกจ -> กดปุ่ม FLASH ที่เกจ (FW 1.0.10: แอพสั่งเริ่มแฟลชไม่ได้แล้ว)
+// เกจเลือก Start Offset / ตำแหน่ง checksum เองตามขนาดไฟล์ (kFlashProfiles) และแก้ checksum ให้ก่อนแฟลช
+// เกจต้องเปิดหน้าเตรียมแฟลชอยู่ (SETUP > CONNECT APP > ECU FLASH) ถึงจะรับไฟล์ได้
 
 class BinEntry {
   String name;
@@ -5547,7 +5533,7 @@ String flashErrText(int e) =>
     const {
       1: 'เกจยังไม่อยู่หน้าเตรียมแฟลช',
       2: 'ไม่มีไฟล์ในเกจ หรือไฟล์ไม่ตรงกับในแอพ',
-      3: 'checksum ของไฟล์ไม่ผ่าน (ผลรวมไม่เป็น 0)',
+      3: 'checksum ของไฟล์ไม่ผ่าน',
       4: 'กล่องยังไม่พร้อม (บิดกุญแจ ON ไม่ติดเครื่อง?)',
       5: 'ลบข้อมูลในกล่องไม่สำเร็จ',
       6: 'ลบข้อมูลผิดพลาด (erase block error)',
@@ -5561,18 +5547,19 @@ String flashErrText(int e) =>
       14: 'Start Offset / ขนาดไฟล์ไม่ถูกต้อง',
       15: 'รับไฟล์ไม่สำเร็จ',
       16: 'สาย K-Line หลุด',
+      17: 'ขนาดไฟล์นี้ยังแฟลชไม่ได้ (รองรับ 48 / 64 KB)',
+      18: 'แก้ checksum ในเกจไม่สำเร็จ',
     }[e] ??
     'error $e';
 
+/// ค่าแฟลชตามขนาดไฟล์ (ต้องตรงกับ F_PROFS ใน EcuFlash.h ของเกจ) : ขนาด -> (start offset, ตำแหน่ง checksum)
+const Map<int, (int, int)> kFlashProfiles = {
+  0x10000: (0x8000, 0x0000), // 64 KB
+  0x0C000: (0x4000, 0xFFFF), // 48 KB
+};
+
 String _mmss(int s) => '${(s ~/ 60).toString().padLeft(2, '0')}:${(s % 60).toString().padLeft(2, '0')}';
 String _hx(int v, [int w = 2]) => '0x${v.toRadixString(16).toUpperCase().padLeft(w, '0')}';
-
-int? _parseHex(String s) {
-  var t = s.trim().toLowerCase();
-  if (t.isEmpty) return null;
-  if (t.startsWith('0x')) t = t.substring(2);
-  return int.tryParse(t, radix: 16);
-}
 
 Future<String?> askText(BuildContext context, String title, String initial, {String hint = '', String ok = 'ตกลง'}) async {
   final tc = TextEditingController(text: initial);
@@ -5677,8 +5664,6 @@ class _FlashPageState extends State<FlashPage> {
   GaugeController get c => widget.c;
   BinEntry? sel;
   Uint8List? data;
-  final offCtl = TextEditingController(), ckCtl = TextEditingController();
-  bool fix = false;
   double? up; // ความคืบหน้าส่งไฟล์ไปเกจ
   bool working = false;
   String? msg;
@@ -5701,8 +5686,6 @@ class _FlashPageState extends State<FlashPage> {
     lib.removeListener(_rb);
     c.removeListener(_rb);
     Cfg.i.removeListener(_rb);
-    offCtl.dispose();
-    ckCtl.dispose();
     super.dispose();
   }
 
@@ -5719,9 +5702,6 @@ class _FlashPageState extends State<FlashPage> {
       setState(() {
         sel = e;
         data = b;
-        offCtl.text = e.offset;
-        ckCtl.text = e.cks;
-        fix = e.fix;
         msg = null;
       });
     } catch (err) {
@@ -5771,143 +5751,28 @@ class _FlashPageState extends State<FlashPage> {
     }
   }
 
-  // ----- ตรวจไฟล์ตามค่าที่ผู้ใช้ใส่ (ไม่แก้อะไรเองถ้าไม่ได้ติ๊ก Fix) -----
-  ({Uint8List? bytes, bool ok, String text}) _prepared() {
-    final d = data;
-    if (d == null) return (bytes: null, ok: false, text: 'เลือกไฟล์จากคลังก่อน');
-    final b = Uint8List.fromList(d);
-    String fixTxt = '';
-    if (fix) {
-      final ck = _parseHex(ckCtl.text);
-      if (ck == null || ck < 0 || ck >= b.length) return (bytes: null, ok: false, text: 'ตำแหน่ง checksum ไม่ถูกต้อง (0x0 – ${_hx(b.length - 1, 4)})');
-      int s = 0;
-      for (int k = 0; k < b.length; k++) {
-        if (k != ck) s += b[k];
-      }
-      final nv = ((s ^ 0xFF) + 1) & 0xFF;
-      fixTxt = 'Fix ที่ ${_hx(ck)}: ${_hx(b[ck])} → ${_hx(nv)} · ';
-      b[ck] = nv;
-    }
-    int t = 0;
-    for (final x in b) {
-      t += x;
-    }
-    final ok = (t & 0xFF) == 0;
-    return (
-      bytes: b,
-      ok: ok,
-      text: ok ? '${fixTxt}checksum ผ่าน (ผลรวม = 0)' : '${fixTxt}checksum ไม่ผ่าน (ผลรวม ${_hx(t & 0xFF)}) — ติ๊ก Fix แล้วใส่ตำแหน่ง checksum',
-    );
-  }
-
-  String? _offErr(int size) {
-    final o = _parseHex(offCtl.text);
-    if (o == null) return 'ใส่ Start Offset (hex) เช่น 0x8000';
-    if (o % 16 != 0) return 'Start Offset ต้องหาร 16 ลงตัว';
-    if (size % 128 != 0) return 'ขนาดไฟล์ต้องหาร 128 ลงตัว ($size ไบต์)';
-    if ((o >> 4) + (size >> 4) > 0x10000) return 'Start Offset + ขนาดไฟล์ เกินช่วงที่กล่องรับ';
-    return null;
-  }
-
-  // ----- แฟลช -----
-  Future<void> _go() async {
+  // ----- ส่งไฟล์ไปเกจ (เริ่มแฟลชด้วยปุ่ม FLASH ที่เกจ) -----
+  Future<void> _send() async {
     final e = sel, d = data;
     final f = c.t.fl;
     if (e == null || d == null || f == null) return;
-    final p = _prepared();
-    final off = _parseHex(offCtl.text);
-    if (!p.ok || off == null || _offErr(d.length) != null) return;
-    final bytes = p.bytes!;
-    final sum16 = bytes.fold<int>(0, (a, x) => (a + x) & 0xFFFF);
-    bool ack = false;
-    final ecuOk = f.ecu == 2 || f.ecu == 3 || f.ecu == 5 || f.ecu == 6;
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (dctx) => StatefulBuilder(
-        builder: (dctx, setD) => AlertDialog(
-          backgroundColor: const Color(0xFF14141A),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: kBad, width: 1.3)),
-          title: const Text('ยืนยันแฟลชกล่อง ECU', style: TextStyle(fontSize: 16, color: kBad, fontWeight: FontWeight.bold)),
-          content: SizedBox(
-            width: 540,
-            child: SingleChildScrollView(
-              child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text('ไฟล์: ${e.name}  (${(bytes.length / 1024).toStringAsFixed(1)} KB)'),
-                Text('Start Offset: ${_hx(off, 4)}'),
-                Text(p.text, style: const TextStyle(color: kGreen)),
-                Text('กล่อง: ${flashEcuText(f.ecu)}${f.ecm != null ? '  ·  ID ${f.ecm!.map((x) => x.toRadixString(16).padLeft(2, '0').toUpperCase()).join(' ')}' : ''}',
-                    style: TextStyle(color: ecuOk ? Colors.white : kAmber)),
-                if (!ecuOk) const Text('กล่องยังไม่อยู่ในสถานะที่แฟลชได้ — เกจจะไม่ยอมเริ่ม', style: TextStyle(color: kAmber)),
-                const SizedBox(height: 10),
-                const Text(
-                    '• บิดกุญแจ ON ห้ามสตาร์ทเครื่อง แบตต้องเต็มหรือต่อเครื่องชาร์จ\n'
-                    '• ห้ามปิดกุญแจ / ถอดสาย ระหว่างแฟลช (ประมาณ 2–3 นาที)\n'
-                    '• ถ้าแฟลชไม่จบ กล่องจะค้างโหมดแฟลช — แฟลชซ้ำจากหน้านี้ได้\n'
-                    '• ควรมีไฟล์เดิมของกล่อง + สาย PC สำรองไว้กู้',
-                    style: TextStyle(fontSize: 12.5, height: 1.4)),
-                InkWell(
-                  onTap: () => setD(() => ack = !ack),
-                  child: Row(children: [
-                    Checkbox(value: ack, activeColor: kBad, onChanged: (v) => setD(() => ack = v ?? false)),
-                    const Expanded(child: Text('เข้าใจความเสี่ยงแล้ว เริ่มแฟลช')),
-                  ]),
-                ),
-              ]),
-            ),
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.of(dctx).pop(false), child: const Text('ยกเลิก')),
-            TextButton(
-              onPressed: ack ? () => Navigator.of(dctx).pop(true) : null,
-              child: Text('แฟลช', style: TextStyle(color: ack ? kBad : Colors.white30, fontWeight: FontWeight.bold)),
-            ),
-          ],
-        ),
-      ),
-    );
-    if (ok != true || !mounted) return;
-    e.offset = offCtl.text.trim();
-    e.cks = ckCtl.text.trim();
-    e.fix = fix;
-    lib.update(e);
+    if (!kFlashProfiles.containsKey(d.length)) return;
     setState(() {
       working = true;
       msg = null;
-      up = null;
+      up = 0;
     });
-    String? err;
-    final g = c.t.fl;
-    final same = g != null && g.fileSize == bytes.length && g.fileSum == sum16 && g.fileCk8 == 0;
-    if (!same) {
-      setState(() => up = 0);
-      err = await c.sendBin(bytes, (v) {
-        if (mounted) setState(() => up = v);
-      });
-    }
-    if (err == null) {
-      await c.clearFlash();
-      await Future.delayed(const Duration(milliseconds: 300));
-      err = await c.startFlash(off, bytes.length, sum16);
-    }
-    if (err == null) {
-      for (int k = 0; k < 40; k++) {
-        await Future.delayed(const Duration(milliseconds: 200));
-        final h = c.t.fl;
-        if (h == null) break;
-        if (h.busy || h.phase >= 9) break;
-        if (h.err != 0) {
-          err = flashErrText(h.err);
-          break;
-        }
-      }
-    }
+    await c.clearFlash();
+    final err = await c.sendBin(d, (v) {
+      if (mounted) setState(() => up = v);
+    }, name: '${e.name}.bin');
     if (!mounted) return;
     setState(() {
       working = false;
       up = null;
       msg = err;
     });
-    if (err != null) _snack(err);
+    _snack(err ?? 'ส่งไฟล์แล้ว ✓ กดปุ่ม FLASH ที่เกจเพื่อเริ่มแฟลช');
   }
 
   // ======================= UI =======================
@@ -5935,7 +5800,7 @@ class _FlashPageState extends State<FlashPage> {
                   ),
                   const SizedBox(width: 12),
                   const Expanded(
-                    child: Text('แก้ตารางที่หน้า TUNE💻 แล้วบันทึกเข้าคลัง → เลือกไฟล์ที่นี่ → แฟลชผ่านเกจ',
+                    child: Text('แก้ตารางที่หน้า TUNE💻 แล้วบันทึกเข้าคลัง → เลือกไฟล์ → ส่งไปเกจ → กด FLASH ที่เกจ',
                         maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 11.5, color: Colors.white54)),
                   ),
                 ]),
@@ -6055,35 +5920,16 @@ class _FlashPageState extends State<FlashPage> {
         ]),
       );
 
-  Widget _field(String label, TextEditingController tc, String hint, {bool enabled = true}) => SizedBox(
-        height: 40,
-        child: TextField(
-          controller: tc,
-          enabled: enabled,
-          onChanged: (_) => setState(() {}),
-          style: const TextStyle(fontSize: 14),
-          decoration: InputDecoration(
-            labelText: label,
-            labelStyle: const TextStyle(fontSize: 12),
-            hintText: hint,
-            hintStyle: const TextStyle(fontSize: 12, color: Colors.white30),
-            isDense: true,
-            border: const OutlineInputBorder(),
-          ),
-        ),
-      );
-
   Widget _flashPanel(AppTheme th) {
     final f = c.t.fl;
     final connected = c.link == LinkState.connected && !c.demo;
     final busy = f?.busy ?? false;
     final d = data;
-    final p = _prepared();
-    final offErr = d == null ? null : _offErr(d.length);
-    final sum16 = p.bytes?.fold<int>(0, (a, x) => (a + x) & 0xFFFF);
-    final onGauge = f != null && p.bytes != null && f.fileSize == p.bytes!.length && f.fileSum == sum16;
-    final hint = sel == null ? null : RegExp(r'__([0-9A-Fa-f]+)-([0-9A-Fa-f]+)').firstMatch(sel!.name);
-    final canGo = connected && f != null && f.prep && !busy && f.phase != 2 && !working && d != null && p.ok && offErr == null;
+    final prof = d == null ? null : kFlashProfiles[d.length];
+    final sum16 = d?.fold<int>(0, (a, x) => (a + x) & 0xFFFF);
+    final sum8 = (sum16 ?? 0) & 0xFF;
+    final onGauge = f != null && d != null && f.fileSize == d.length && f.fileSum == sum16;
+    final canSend = connected && f != null && f.prep && !busy && f.phase != 2 && !working && d != null && prof != null;
 
     String gaugeTxt;
     Color gaugeCol;
@@ -6094,7 +5940,7 @@ class _FlashPageState extends State<FlashPage> {
       gaugeTxt = 'ยังไม่ได้เชื่อมต่อเกจ (กดเชื่อมต่อที่หน้าหลัก)';
       gaugeCol = kBad;
     } else if (f == null) {
-      gaugeTxt = 'เฟิร์มแวร์เกจยังไม่รองรับ (ต้อง FW 1.0.9 ขึ้นไป)';
+      gaugeTxt = 'เฟิร์มแวร์เกจยังไม่รองรับ (ต้อง FW 1.0.10 ขึ้นไป)';
       gaugeCol = kBad;
     } else if (!f.prep) {
       gaugeTxt = 'เปิดที่เกจ: SETUP > CONNECT APP > ECU FLASH';
@@ -6104,24 +5950,37 @@ class _FlashPageState extends State<FlashPage> {
       gaugeCol = kGreen;
     }
 
-    // ความคืบหน้า
+    // ความคืบหน้า (ส่งไฟล์ / แฟลชที่เกจ — แอพดูอย่างเดียว)
     String phase = '';
     double? prog;
     String sizeTxt = '', timeTxt = '';
     if (up != null) {
       phase = 'กำลังส่งไฟล์ไปเกจ';
       prog = up;
-      final n = p.bytes?.length ?? 0;
-      sizeTxt = '${(n * up! / 1024).toStringAsFixed(1)} / ${(n / 1024).toStringAsFixed(1)} KB';
+      final n = d?.length ?? 0;
+      sizeTxt = '${(n * up! / 1024).round()}/${(n / 1024).round()} KB';
     } else if (f != null && f.prep) {
       phase = flashPhaseText(f.phase);
       if (busy || f.phase >= 9) {
-        prog = f.phase == 9 ? 1.0 : f.pct / 100;
-        sizeTxt = '${(f.done / 1024).toStringAsFixed(1)} / ${(f.total / 1024).toStringAsFixed(1)} KB';
-        timeTxt = '${_mmss(f.elapsed)} / เหลือ ${_mmss(f.eta)}';
+        prog = f.phase == 9 ? 1.0 : (f.total > 0 ? f.done / f.total : f.pct / 100);
+        sizeTxt = '${((f.phase == 9 ? f.total : f.done) / 1024).round()}/${(f.total / 1024).round()} KB';
+        timeTxt = _mmss(f.elapsed);
       }
     }
     final phaseCol = f?.phase == 9 ? kGreen : (f?.phase == 10 ? kBad : Colors.white);
+
+    String fileTxt = '';
+    Color fileCol = kGreen;
+    if (d != null) {
+      if (prof == null) {
+        fileTxt = 'ขนาด ${(d.length / 1024).toStringAsFixed(1)} KB ยังแฟลชไม่ได้ (ตอนนี้รองรับ 48 KB และ 64 KB)';
+        fileCol = kAmber;
+      } else {
+        fileTxt = '${(d.length / 1024).round()} KB → เกจใช้ Start Offset ${_hx(prof.$1, 4)} · checksum ที่ ${_hx(prof.$2, 4)}\n'
+            '${sum8 == 0 ? 'checksum ผ่านแล้ว' : 'checksum ยังไม่ผ่าน (ผลรวม ${_hx(sum8)}) — เกจจะแก้ให้อัตโนมัติก่อนแฟลช'}';
+        fileCol = sum8 == 0 ? kGreen : kAmber;
+      }
+    }
 
     return SingleChildScrollView(
       child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
@@ -6138,40 +5997,15 @@ class _FlashPageState extends State<FlashPage> {
         const Divider(color: Colors.white12, height: 16),
         Text(sel == null ? 'เลือกไฟล์จากคลังทางซ้าย' : 'ไฟล์: ${sel!.name}',
             maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: th.c2)),
-        const SizedBox(height: 8),
-        Row(children: [
-          Expanded(child: _field('Start Offset (hex)', offCtl, 'เช่น 0x8000', enabled: !busy && !working)),
-          const SizedBox(width: 8),
-          InkWell(
-            onTap: busy || working ? null : () => setState(() => fix = !fix),
-            child: Row(children: [
-              Checkbox(value: fix, activeColor: th.c, onChanged: busy || working ? null : (v) => setState(() => fix = v ?? false)),
-              const Text('Fix checksum', style: TextStyle(fontSize: 12.5)),
-            ]),
-          ),
-          const SizedBox(width: 6),
-          SizedBox(width: 110, child: _field('ตำแหน่ง (hex)', ckCtl, 'เช่น 0x0', enabled: fix && !busy && !working)),
-        ]),
-        if (hint != null && !busy && !working)
-          Padding(
-            padding: const EdgeInsets.only(top: 6),
-            child: InkWell(
-              onTap: () => setState(() {
-                offCtl.text = '0x${hint.group(1)!.toUpperCase()}';
-                ckCtl.text = '0x${hint.group(2)!.toUpperCase()}';
-                fix = true;
-              }),
-              child: Text('ชื่อไฟล์บอก offset 0x${hint.group(1)!.toUpperCase()} / checksum 0x${hint.group(2)!.toUpperCase()} — แตะเพื่อใช้ค่านี้',
-                  style: TextStyle(fontSize: 11.5, color: th.c, decoration: TextDecoration.underline)),
-            ),
-          ),
         const SizedBox(height: 6),
-        if (d != null) ...[
-          Text(p.text, style: TextStyle(fontSize: 12, color: p.ok ? kGreen : kAmber)),
-          if (offErr != null) Text(offErr, style: const TextStyle(fontSize: 12, color: kAmber)),
-        ],
+        if (d != null) Text(fileTxt, style: TextStyle(fontSize: 12, color: fileCol, height: 1.35)),
         const SizedBox(height: 10),
-        _btn(th, busy ? 'กำลังแฟลช…' : 'แฟลชลงกล่อง ECU', canGo ? _go : null, ic: Icons.bolt, col: kBad, big: true),
+        _btn(th, onGauge ? 'ส่งไฟล์ไปเกจอีกครั้ง' : 'ส่งไฟล์ไปเกจ', canSend ? _send : null, ic: Icons.send_to_mobile, big: true),
+        const SizedBox(height: 6),
+        const Text(
+            'ส่งไฟล์แล้วกดปุ่ม FLASH ที่หน้าเกจเพื่อเริ่มแฟลช (แอพสั่งแฟลชไม่ได้)\n'
+            'เกจจะไม่ให้กด FLASH ถ้าไม่พบกล่อง ECU · ลบไฟล์ในเกจได้ที่ปุ่ม "ลบไฟล์" บนเกจ',
+            style: TextStyle(fontSize: 11.5, color: Colors.white54, height: 1.35)),
         const SizedBox(height: 10),
         if (phase.isNotEmpty) ...[
           Row(children: [
@@ -6190,7 +6024,7 @@ class _FlashPageState extends State<FlashPage> {
             Text(timeTxt, style: const TextStyle(fontSize: 12, color: Colors.white70)),
           ]),
         ],
-        if (busy) const Text('ห้ามปิดกุญแจ / ถอดสาย — ออกจากหน้านี้ได้ เกจแฟลชต่อเอง', style: TextStyle(fontSize: 12, color: kBad)),
+        if (busy) const Text('เกจกำลังแฟลช — ห้ามปิดกุญแจ / ถอดสาย (ออกจากหน้านี้ได้ เกจแฟลชต่อเอง)', style: TextStyle(fontSize: 12, color: kBad)),
         if (f != null && f.err != 0) Text('เกจแจ้ง: ${flashErrText(f.err)}', style: const TextStyle(fontSize: 12, color: kBad)),
         if (msg != null) Text(msg!, style: const TextStyle(fontSize: 12, color: kBad)),
         if (f != null && f.phase == 9)
