@@ -823,7 +823,7 @@ class GaugeController extends ChangeNotifier {
   }
 
   /// ส่งไฟล์ BIN ไปเก็บในเกจ (เกจต้องอยู่หน้าเตรียมแฟลช) คืนค่า null = สำเร็จ, ข้อความ = error
-  Future<String?> sendBin(Uint8List data, void Function(double) onProgress, {String name = ''}) async {
+  Future<String?> sendBin(Uint8List data, void Function(double) onProgress, {String name = '', int? startOff, int? ckOff}) async {
     final ch = _imgCh;
     if (ch == null || link != LinkState.connected || _dev == null) return 'ยังไม่ได้เชื่อมต่อเกจ';
     final f0 = t.fl;
@@ -833,9 +833,21 @@ class GaugeController extends ChangeNotifier {
     try {
       final chunk = (_dev!.mtuNow - 4).clamp(16, 200).toInt();
       final n = data.length;
-      // ชื่อไฟล์ (ASCII เท่านั้น สูงสุด 32 ตัว) ให้เกจแสดง
-      final nm = [for (final u in name.codeUnits) (u >= 0x20 && u < 0x7F) ? u : 0x5F].take(32).toList();
-      await ch.write([0x21, n & 255, (n >> 8) & 255, (n >> 16) & 255, (n >> 24) & 255, ...nm]);
+      // offset override ตาม ID กล่อง: แนบ marker 0x00 + start u32 + checksum u32 (เกจจะใช้แทน by-size)
+      final over = (startOff != null && ckOff != null);
+      // ชื่อไฟล์ (ASCII เท่านั้น) ให้เกจแสดง — เว้นที่ให้ offset เมื่อแนบมาด้วย
+      final nm = [for (final u in name.codeUnits) (u >= 0x20 && u < 0x7F) ? u : 0x5F].take(over ? 20 : 32).toList();
+      if (over) {
+        await ch.write([
+          0x21, n & 255, (n >> 8) & 255, (n >> 16) & 255, (n >> 24) & 255,
+          0x00,
+          startOff & 255, (startOff >> 8) & 255, (startOff >> 16) & 255, (startOff >> 24) & 255,
+          ckOff & 255, (ckOff >> 8) & 255, (ckOff >> 16) & 255, (ckOff >> 24) & 255,
+          ...nm,
+        ]);
+      } else {
+        await ch.write([0x21, n & 255, (n >> 8) & 255, (n >> 16) & 255, (n >> 24) & 255, ...nm]);
+      }
       int sum = 0;
       bool sawRecv = false;
       for (int off = 0; off < n; off += chunk) {
@@ -6856,7 +6868,9 @@ class _FlashPageState extends State<FlashPage> {
     final f = c.t.fl;
     final nm = extName ?? (sel != null ? '${sel!.name}.bin' : null);
     if (nm == null || d == null || f == null) return;
-    if (!kFlashProfiles.containsKey(d.length)) return;
+    // offset ตาม ID กล่อง (ฐานข้อมูล) ก่อน ถ้าไม่มีค่อย fallback เลือกตามขนาดไฟล์
+    final idProf = f.ecm != null ? EcuDb.profile[ecmHex(f.ecm)] : null;
+    if (idProf == null && !kFlashProfiles.containsKey(d.length)) return;
     setState(() {
       working = true;
       msg = null;
@@ -6865,7 +6879,7 @@ class _FlashPageState extends State<FlashPage> {
     await c.clearFlash();
     final err = await c.sendBin(d, (v) {
       if (mounted) setState(() => up = v);
-    }, name: nm);
+    }, name: nm, startOff: idProf?.$1, ckOff: idProf?.$2);
     if (!mounted) return;
     setState(() {
       working = false;
@@ -7046,7 +7060,8 @@ class _FlashPageState extends State<FlashPage> {
     final connected = c.link == LinkState.connected && !c.demo;
     final busy = f?.busy ?? false;
     final d = data;
-    final prof = d == null ? null : kFlashProfiles[d.length];
+    final idProf = f?.ecm != null ? EcuDb.profile[ecmHex(f!.ecm)] : null; // offset ตาม ID กล่อง
+    final prof = idProf ?? (d == null ? null : kFlashProfiles[d.length]); // ไม่มี ID-profile ค่อย fallback by-size
     final sum16 = d?.fold<int>(0, (a, x) => (a + x) & 0xFFFF);
     final sum8 = (sum16 ?? 0) & 0xFF;
     final onGauge = f != null && d != null && f.fileSize == d.length && f.fileSum == sum16;
