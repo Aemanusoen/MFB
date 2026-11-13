@@ -5018,7 +5018,7 @@ class _TunePageState extends State<TunePage> {
                   style: const TextStyle(fontSize: 12.5)),
               box(kAmber, 'CHECKSUM (ไม่แก้อัตโนมัติ)',
                   'ผลรวมไบต์ของไฟล์ตอนนี้ = 0x${sum8.toRadixString(16).toUpperCase().padLeft(2, '0')}${sum8 == 0 ? ' (ผ่าน)' : ' (ยังไม่ผ่าน)'}\n'
-                      'เกจเลือก Start Offset และแก้ checksum ให้เองตามขนาดไฟล์ ตอนกด FLASH ที่เกจ (ตอนนี้รองรับ 48 KB และ 64 KB)'),
+                      'เกจคำนวณ checksum ใหม่ให้เองตอนกด FLASH ที่เกจ (Keihin ตาม ID กล่อง/ขนาดไฟล์ · Shindengen อัตโนมัติ)'),
               if (locks.isEmpty)
                 box(Colors.white38, 'รหัสล็อคกล่อง', 'ไม่ได้เปลี่ยน')
               else
@@ -6481,7 +6481,8 @@ class _BarsPainter extends CustomPainter {
 // =====================================================================
 // คลังไฟล์: เก็บในพื้นที่ของแอพ (Documents/bin_lib/<ชื่อ>.bin + index.json) ตั้งชื่อเองได้
 // หน้า FLASH: เลือกไฟล์จากคลัง -> ส่งไฟล์ไปเกจ -> กดปุ่ม FLASH ที่เกจ (FW 1.0.10: แอพสั่งเริ่มแฟลชไม่ได้แล้ว)
-// เกจเลือก Start Offset / ตำแหน่ง checksum เองตามขนาดไฟล์ (kFlashProfiles) และแก้ checksum ให้ก่อนแฟลช
+// FW 1.0.13: เกจสรุปชนิดกล่องจากไฟล์ (Keihin / Shindengen) ; Keihin ใช้ offset ที่แอพส่งตาม ID กล่อง ไม่มีค่อยเลือกตามขนาดไฟล์
+// (kFlashProfiles) ; เกจคำนวณ checksum ใหม่ก่อนแฟลชเสมอ (ดู binPlan = ตรรกะเดียวกับ fPlanBuild ใน EcuFlash.h)
 // เกจต้องเปิดหน้าเตรียมแฟลชอยู่ (SETUP > CONNECT APP > ECU FLASH) ถึงจะรับไฟล์ได้
 
 class BinEntry {
@@ -6643,8 +6644,8 @@ String flashErrText(int e) =>
       5: 'ลบข้อมูลในกล่องไม่สำเร็จ',
       6: 'ลบข้อมูลผิดพลาด (erase block error)',
       7: 'เขียนไม่สำเร็จ (กล่องไม่ตอบบล็อกแรก)',
-      8: 'เขียนไม่สำเร็จ (ส่งซ้ำครบแล้ว)',
-      9: 'กล่องตอบที่อยู่ไม่ตรง',
+      8: 'เขียนไม่สำเร็จ (กล่องไม่ตอบ ส่งซ้ำครบแล้ว)',
+      9: 'กล่องไม่รับบล็อกข้อมูล',
       10: 'ตรวจสอบหลังเขียนไม่ผ่าน',
       11: 'เกจอ่านไฟล์ไม่ได้',
       12: 'พื้นที่ในเกจไม่พอ',
@@ -6652,16 +6653,117 @@ String flashErrText(int e) =>
       14: 'Start Offset / ขนาดไฟล์ไม่ถูกต้อง',
       15: 'รับไฟล์ไม่สำเร็จ',
       16: 'สาย K-Line หลุด',
-      17: 'ขนาดไฟล์นี้ยังแฟลชไม่ได้ (รองรับ 48 / 64 KB)',
+      17: 'ขนาดไฟล์นี้ยังแฟลชไม่ได้ (ไม่อยู่ในตารางของเกจ)',
       18: 'แก้ checksum ในเกจไม่สำเร็จ',
+      19: 'ID กล่องไม่ตรงกับตอนส่งไฟล์ — ส่งไฟล์ใหม่อีกครั้ง',
+      20: 'ขอ seed จากกล่อง Shindengen ไม่สำเร็จ',
+      21: 'seed/key ไม่ผ่าน (ไม่พบ key ในไฟล์ หรือกล่องไม่รับ)',
     }[e] ??
     'error $e';
 
-/// ค่าแฟลชตามขนาดไฟล์ (ต้องตรงกับ F_PROFS ใน EcuFlash.h ของเกจ) : ขนาด -> (start offset, ตำแหน่ง checksum)
+/// ค่าแฟลชตามขนาดไฟล์ Keihin (ต้องตรงกับ F_PROFS ใน EcuFlash.h ของเกจ = GetOffsetsFromBinType ของโปรแกรม PC)
+/// ขนาด -> (start offset, ตำแหน่ง checksum ในไฟล์)
 const Map<int, (int, int)> kFlashProfiles = {
+  0x0C000: (0x4000, 0x7600), // 48 KB
+  0x0E000: (0x0000, 0xDFEF), // 56 KB
   0x10000: (0x8000, 0x0000), // 64 KB
-  0x0C000: (0x4000, 0xFFFF), // 48 KB
+  0x18000: (0x8000, 0x0000), // 96 KB
+  0x20000: (0xE0000, 0xB000), // 128 KB
 };
+const int kFlashMaxSize = 512 * 1024; // FL_MAX_SIZE ของเกจ
+
+/// แผนแฟลชที่เกจจะสรุปจากไฟล์ (เลียนแบบ fPlanBuild ใน EcuFlash.h เพื่อแสดงผลและกันส่งไฟล์ที่เกจจะปฏิเสธ)
+class BinPlan {
+  final String type; // KH / KH-H8C / KH-M32R / SH-V850 / SH-RH850 / SH-RH850B
+  final bool sh; // Shindengen: start offset + checksum อัตโนมัติ
+  final int off, ck; // ck ใช้เฉพาะ Keihin
+  final bool fromId; // offset มาจากฐานข้อมูลตาม ID กล่อง (แอพส่งไปให้เกจ)
+  final String? why; // null = แฟลชได้ ; ข้อความ = เหตุผลที่แฟลชไม่ได้
+  const BinPlan(this.type, this.sh, this.off, this.ck, this.fromId, this.why);
+  bool get ok => why == null;
+}
+
+bool _binTail(Uint8List d, List<int> sig) {
+  final n = d.length;
+  if (n < sig.length) return false;
+  for (int i = 0; i < sig.length; i++) {
+    if (d[n - sig.length + i] != sig[i]) return false;
+  }
+  return true;
+}
+
+int _binFind(Uint8List d, List<int> sig) {
+  final lim = d.length - 7; // เกจ/โปรแกรม PC ค้นถึง size-7
+  final a = sig[0];
+  for (int i = 0; i < lim; i++) {
+    if (d[i] != a) continue;
+    bool m = true;
+    for (int k = 1; k < sig.length; k++) {
+      if (d[i + k] != sig[k]) {
+        m = false;
+        break;
+      }
+    }
+    if (m) return i;
+  }
+  return -1;
+}
+
+BinPlan binPlan(Uint8List d, (int, int)? idProf) {
+  final n = d.length;
+  if (n < 128) return const BinPlan('?', false, 0, 0, false, 'ไฟล์เล็กเกินไป');
+  if (n > kFlashMaxSize) {
+    return BinPlan('?', false, 0, 0, false, 'ไฟล์ ${(n / 1024).round()} KB ใหญ่เกินที่เกจเก็บได้ (สูงสุด 512 KB)');
+  }
+  // ----- Shindengen: ท้ายไฟล์ 5A 5A 5A 5A + "SV850" / "SH850" -----
+  if (_binTail(d, const [0x5A, 0x5A, 0x5A, 0x5A])) {
+    final pV = _binFind(d, const [0x53, 0x56, 0x38, 0x35, 0x30]);
+    final pR = _binFind(d, const [0x53, 0x48, 0x38, 0x35, 0x30]);
+    final pW = _binFind(d, const [0x11, 0x12, 0x13, 0x14, 0x15, 0x15, 0x17]);
+    String? t;
+    if (pV >= 0 && (pR < 0 || pV < pR)) {
+      t = 'SH-V850';
+    } else if (pR >= 0) {
+      final b = n > 0xA004 && d[0xA000] == 0xA5 && d[0xA001] == 0xA5 && d[0xA002] == 0xA5 && d[0xA003] == 0xA5 && d[0xA004] == 0x00;
+      t = b ? 'SH-RH850B' : 'SH-RH850';
+    } else if (pW >= 0) {
+      t = 'SH-V850';
+    }
+    if (t != null) {
+      final off = t == 'SH-RH850B' ? 0xA000 : 0x10000;
+      final bad = (n % 128) != 0 || off >= n || (n >> 4) > 0x10000;
+      return BinPlan(t, true, off, 0, false, bad ? 'ขนาดไฟล์ Shindengen ไม่ถูกต้อง' : null);
+    }
+  }
+  // ----- Keihin -----
+  String t = 'KH';
+  if ((n == 57344 || n == 32768) && _binTail(d, const [0xFF, 0xFF, 0xAA, 0xAA])) {
+    t = 'KH-H8C';
+  } else if (n == 262144 && _binTail(d, const [0xFF, 0xFF, 0xFF, 0xAA, 0xAA, 0xAA, 0xAA])) {
+    t = 'KH-M32R';
+  }
+  (int, int)? pr = idProf;
+  final fromId = pr != null;
+  pr ??= kFlashProfiles[n];
+  if (pr == null && n == 262144 &&
+      (_binTail(d, const [0xFF, 0xFF, 0xFF, 0, 0, 0, 0]) ||
+          _binTail(d, const [0xFF, 0xFF, 0xFF, 0xAA, 0xAA, 0xAA, 0xAA]) ||
+          _binTail(d, const [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]))) {
+    pr = (0, 0x3FFF8);
+  }
+  if (pr == null && n == 524288 && _binTail(d, const [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF])) pr = (0, 0x7FFF8);
+  if (pr == null) {
+    return BinPlan(t, false, 0, 0, false, 'ขนาด ${(n / 1024).toStringAsFixed(1)} KB ไม่อยู่ในตารางของเกจ และไม่พบ ID กล่องในฐานข้อมูล');
+  }
+  final bs = t == 'KH-H8C' ? 64 : 128;
+  String? why;
+  if (pr.$2 >= n) {
+    why = 'ตำแหน่ง checksum ${_hx(pr.$2, 4)} อยู่นอกไฟล์ ${(n / 1024).round()} KB — ไฟล์นี้ไม่ใช่ขนาดของกล่องรุ่นนี้';
+  } else if ((pr.$1 & 15) != 0 || (n % bs) != 0 || ((pr.$1 >> 4) + (n >> 4)) > 0x10000) {
+    why = 'Start Offset / ขนาดไฟล์ไม่ถูกต้อง';
+  }
+  return BinPlan(t, false, pr.$1, pr.$2, fromId, why);
+}
 
 String _mmss(int s) => '${(s ~/ 60).toString().padLeft(2, '0')}:${(s % 60).toString().padLeft(2, '0')}';
 String _hx(int v, [int w = 2]) => '0x${v.toRadixString(16).toUpperCase().padLeft(w, '0')}';
@@ -6773,6 +6875,21 @@ class _FlashPageState extends State<FlashPage> {
   double? up; // ความคืบหน้าส่งไฟล์ไปเกจ
   bool working = false;
   String? msg;
+  // จำผลสรุปไฟล์ไว้ (ค้นลายเซ็น + ผลรวมทั้งไฟล์ช้า ไม่ควรทำทุกครั้งที่ได้ข้อมูลจากเกจ)
+  Uint8List? _planFor;
+  String _planKey = '';
+  BinPlan? _plan;
+  int _sum16 = 0;
+  BinPlan _planOf(Uint8List d, (int, int)? idProf) {
+    final key = idProf == null ? '-' : '${idProf.$1}:${idProf.$2}';
+    if (!identical(_planFor, d) || _planKey != key || _plan == null) {
+      if (!identical(_planFor, d)) _sum16 = d.fold<int>(0, (a, x) => (a + x) & 0xFFFF);
+      _planFor = d;
+      _planKey = key;
+      _plan = binPlan(d, idProf);
+    }
+    return _plan!;
+  }
 
   void _rb() {
     if (mounted) setState(() {});
@@ -6868,9 +6985,10 @@ class _FlashPageState extends State<FlashPage> {
     final f = c.t.fl;
     final nm = extName ?? (sel != null ? '${sel!.name}.bin' : null);
     if (nm == null || d == null || f == null) return;
-    // offset ตาม ID กล่อง (ฐานข้อมูล) ก่อน ถ้าไม่มีค่อย fallback เลือกตามขนาดไฟล์
+    // offset ตาม ID กล่อง (ฐานข้อมูล) ก่อน ถ้าไม่มีเกจเลือกตามขนาดไฟล์ ; Shindengen เกจหา offset/checksum เอง
     final idProf = f.ecm != null ? EcuDb.profile[ecmHex(f.ecm)] : null;
-    if (idProf == null && !kFlashProfiles.containsKey(d.length)) return;
+    final plan = binPlan(d, idProf);
+    if (!plan.ok) return;
     setState(() {
       working = true;
       msg = null;
@@ -6879,7 +6997,7 @@ class _FlashPageState extends State<FlashPage> {
     await c.clearFlash();
     final err = await c.sendBin(d, (v) {
       if (mounted) setState(() => up = v);
-    }, name: nm, startOff: idProf?.$1, ckOff: idProf?.$2);
+    }, name: nm, startOff: plan.fromId ? plan.off : null, ckOff: plan.fromId ? plan.ck : null);
     if (!mounted) return;
     setState(() {
       working = false;
@@ -7061,11 +7179,12 @@ class _FlashPageState extends State<FlashPage> {
     final busy = f?.busy ?? false;
     final d = data;
     final idProf = f?.ecm != null ? EcuDb.profile[ecmHex(f!.ecm)] : null; // offset ตาม ID กล่อง
-    final prof = idProf ?? (d == null ? null : kFlashProfiles[d.length]); // ไม่มี ID-profile ค่อย fallback by-size
-    final sum16 = d?.fold<int>(0, (a, x) => (a + x) & 0xFFFF);
+    final plan = d == null ? null : _planOf(d, idProf); // แผนที่เกจจะสรุปจากไฟล์นี้
+    final sum16 = d == null ? null : _sum16;
     final sum8 = (sum16 ?? 0) & 0xFF;
+    // หมายเหตุ: หลังกด FLASH เกจคำนวณ checksum ใหม่ลงไฟล์ในเกจ ผลรวมจึงอาจไม่ตรงกับไฟล์ในแอพอีก
     final onGauge = f != null && d != null && f.fileSize == d.length && f.fileSum == sum16;
-    final canSend = connected && f != null && f.prep && !busy && f.phase != 2 && !working && d != null && prof != null;
+    final canSend = connected && f != null && f.prep && !busy && f.phase != 2 && !working && d != null && plan != null && plan.ok;
 
     String gaugeTxt;
     Color gaugeCol;
@@ -7108,13 +7227,19 @@ class _FlashPageState extends State<FlashPage> {
     String fileTxt = '';
     Color fileCol = kGreen;
     if (d != null) {
-      if (prof == null) {
-        fileTxt = 'ขนาด ${(d.length / 1024).toStringAsFixed(1)} KB ยังแฟลชไม่ได้ (ตอนนี้รองรับ 48 KB และ 64 KB)';
+      final pl = plan!;
+      if (!pl.ok) {
+        fileTxt = '${(d.length / 1024).toStringAsFixed(1)} KB · ${pl.type} — แฟลชไม่ได้: ${pl.why}';
         fileCol = kAmber;
+      } else if (pl.sh) {
+        fileTxt = '${(d.length / 1024).round()} KB · ${pl.type} (Shindengen) → เริ่มเขียนที่ ${_hx(pl.off, 4)}\n'
+            'checksum 32 บิต และ seed/key เกจคำนวณจากไฟล์เองตอนกด FLASH';
+        fileCol = kGreen;
       } else {
-        fileTxt = '${(d.length / 1024).round()} KB → เกจใช้ Start Offset ${_hx(prof.$1, 4)} · checksum ที่ ${_hx(prof.$2, 4)}\n'
-            '${sum8 == 0 ? 'checksum ผ่านแล้ว' : 'checksum ยังไม่ผ่าน (ผลรวม ${_hx(sum8)}) — เกจจะแก้ให้อัตโนมัติก่อนแฟลช'}';
-        fileCol = sum8 == 0 ? kGreen : kAmber;
+        fileTxt = '${(d.length / 1024).round()} KB · ${pl.type} → Start Offset ${_hx(pl.off, 4)} · checksum ที่ ${_hx(pl.ck, 4)}'
+            ' (${pl.fromId ? 'ตาม ID กล่อง' : 'ตามขนาดไฟล์'})\n'
+            '${sum8 == 0 ? 'checksum ผ่านแล้ว' : 'ผลรวมไบต์ ${_hx(sum8)} — เกจคำนวณ checksum ใหม่ให้ก่อนแฟลช'}';
+        fileCol = kGreen;
       }
     }
 
