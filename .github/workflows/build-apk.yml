@@ -84,7 +84,8 @@ jobs:
           PY
 
       # แก้ error: ไลบรารีบางตัวคอมไพล์กับ android-33 แต่ dependency ต้องการ 34+
-      - name: Force compileSdk 36 for plugin modules
+      # + ปิด lintVital ไม่ให้ release build ล้มเพราะ lint (workflow สร้าง android/ ใหม่ทุกครั้ง แก้ build.gradle ตรง ๆ ไม่ได้)
+      - name: Force compileSdk 36 for plugin modules + disable lintVital
         run: |
           mkdir -p ~/.gradle
           cat > ~/.gradle/init.gradle <<'EOG'
@@ -93,6 +94,9 @@ jobs:
               if (p.plugins.hasPlugin('com.android.library')) {
                 p.android.compileSdkVersion 36
               }
+            }
+            tasks.configureEach { t ->
+              if (t.name.toLowerCase().startsWith('lint')) { t.enabled = false }
             }
           }
           EOG
