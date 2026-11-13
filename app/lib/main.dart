@@ -1395,7 +1395,7 @@ class _GaugePageState extends State<GaugePage> {
           Expanded(
             child: Text(
                 log.ready
-                    ? '${log.rows}×${log.cols} · ${log.src} · ${log.filled} ช่อง${live ? '' : ' · เปิด DEMO เพื่อจำลอง'}'
+                    ? '${log.rows}×${log.cols} · ${log.src} · ${log.filled} ช่อง'
                     : 'ยังไม่มีตาราง',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
@@ -1416,10 +1416,13 @@ class _GaugePageState extends State<GaugePage> {
             borderRadius: BorderRadius.circular(8),
             child: log.ready
                 ? LayoutBuilder(builder: (_, cs) {
-                    _afrSz = Size(cs.maxWidth, cs.maxHeight);
-                    return GestureDetector(
-                      onTapUp: (dd) => _afrTap(dd.localPosition),
-                      child: CustomPaint(size: Size.infinite, painter: _AfrPainter(log, th)),
+                    final h = _AfrPainter.hh + log.rows * _AfrPainter.rh;
+                    _afrSz = Size(cs.maxWidth, h);
+                    return SingleChildScrollView(
+                      child: GestureDetector(
+                        onTapUp: (dd) => _afrTap(dd.localPosition),
+                        child: CustomPaint(size: Size(cs.maxWidth, h), painter: _AfrPainter(log, th)),
+                      ),
                     );
                   })
                 : const Center(child: Text('ยังไม่มีตาราง', style: TextStyle(color: Colors.white54))),
@@ -3740,7 +3743,7 @@ class _TriPainter extends CustomPainter {
 // ---------- AFR LOG: เก็บค่า AFR สดลงตาราง RPM × TPS (แกนเดียวกับตารางน้ำมัน) ----------
 // ดูอย่างเดียว ไม่เขียนลง BIN | เก็บเป็นค่าเฉลี่ยสะสมต่อช่อง + จำนวนครั้ง | บันทึกลงเครื่องทุก ~10 วินาที (Documents/afr_log.json)
 // แกนเริ่มต้นของหน้า AFR LOG เมื่อยังไม่ได้เปิด XDF : RPM 29 แถว (1000..9400) × TPS 25 คอลัมน์ (0..100%)
-final List<double> kAfrDefRpm = [for (int i = 0; i < 29; i++) (1000 + i * 300).toDouble()];
+final List<double> kAfrDefRpm = [for (int i = 0; i <= 44; i++) (800 + i * 300).toDouble()]; // 800..14000 (45 แถว) เลื่อนดูได้
 final List<double> kAfrDefTps = [for (int i = 0; i < 25; i++) i * 100 / 24];
 
 class AfrLog extends ChangeNotifier {
@@ -4050,10 +4053,13 @@ class _AfrLogPageState extends State<AfrLogPage> {
                   borderRadius: BorderRadius.circular(9),
                   child: log.ready
                       ? LayoutBuilder(builder: (_, cs) {
-                          _sz = Size(cs.maxWidth, cs.maxHeight);
-                          return GestureDetector(
-                            onTapUp: (d) => _tapCell(d.localPosition),
-                            child: CustomPaint(size: Size.infinite, painter: _AfrPainter(log, th)),
+                          final h = _AfrPainter.hh + log.rows * _AfrPainter.rh;
+                          _sz = Size(cs.maxWidth, h);
+                          return SingleChildScrollView(
+                            child: GestureDetector(
+                              onTapUp: (d) => _tapCell(d.localPosition),
+                              child: CustomPaint(size: Size(cs.maxWidth, h), painter: _AfrPainter(log, th)),
+                            ),
                           );
                         })
                       : const Center(child: Text('ยังไม่มีตาราง', style: TextStyle(color: Colors.white54))),
@@ -4088,10 +4094,10 @@ class _AfrPainter extends CustomPainter {
   final AppTheme th;
   _AfrPainter(this.log, this.th);
 
-  static const double hw = 40, hh = 18;
-  /// (x0, y0, cw, ch) ของช่องข้อมูล
+  static const double hw = 40, hh = 18, rh = 20;   // rh = ความสูงคงที่ต่อแถว (ถ้าเกินจอให้เลื่อนดู ไม่ย่อ)
+  /// (x0, y0, cw, ch) ของช่องข้อมูล — ความสูงแถวคงที่ (rh) ไม่ขึ้นกับความสูงจอ
   static (double, double, double, double) geom(Size s, int rows, int cols) =>
-      (hw, hh, (s.width - hw) / cols, (s.height - hh) / rows);
+      (hw, hh, (s.width - hw) / cols, rh);
 
   @override
   void paint(Canvas canvas, Size size) {
