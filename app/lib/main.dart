@@ -44,7 +44,11 @@ const kThemes = <AppTheme>[
   AppTheme('ฟ้า', Color(0xFF2EB8FF), Color(0xFFA2E3FF)),
   AppTheme('เขียวนีออน', Color(0xFF39FF14), Color(0xFFB4FF9E)),
   AppTheme('ชมพู', Color(0xFFFF4FD8), Color(0xFFFFAEEF)),
+  AppTheme('น้ำเงิน', Color(0xFF2A5BFF), Color(0xFFAFC2FF)),
 ];
+
+// เวอร์ชันเฟิร์มแวร์ที่แอพรุ่นนี้ออกแบบมาให้ใช้คู่กัน (แสดงเทียบในหน้า SETTING)
+const kAppFw = '1.0.13';
 
 // ---------- ค่าคีย์ที่แสดงได้ (เหมือน TEST1 + TOP SPD) ----------
 const int kTps = 0, kTemp = 1, kBatt = 2, kAfr = 3, kInj = 4, kIgn = 5, kRpm = 6, kMap = 7,
@@ -228,11 +232,14 @@ class Telemetry {
   final int state, proto, bike, img;
   final double? rpm, speed, ect, iat, eot, tps, map, batt, afr, ign, inj, o2v, stft, ltft;
   final FlashStat? fl; // null = เฟิร์มแวร์เกจไม่รองรับการแฟลช (ต่ำกว่า 1.0.9)
+  final int? fwMaj, fwMin, fwPatch; // เวอร์ชันเฟิร์มแวร์เกจ (null = เฟิร์มแวร์เก่าที่ยังไม่ส่งเวอร์ชัน)
   Telemetry({
     this.fresh = false, this.state = 0, this.proto = 0, this.bike = 0, this.img = 0,
     this.rpm, this.speed, this.ect, this.iat, this.eot, this.tps, this.map,
     this.batt, this.afr, this.ign, this.inj, this.o2v, this.stft, this.ltft, this.fl,
+    this.fwMaj, this.fwMin, this.fwPatch,
   });
+  String? get fwText => fwMaj == null ? null : '$fwMaj.$fwMin.$fwPatch';
 
   static Telemetry? parse(List<int> b) {
     if (b.length < 34 || b[0] != 1) return null;
@@ -249,6 +256,9 @@ class Telemetry {
       afr: f(22, 100), ign: f(24, 10), inj: f(26, 100), o2v: f(28, 1000),
       stft: f(30, 1000), ltft: f(32, 1000),
       fl: FlashStat.parse(b),
+      fwMaj: b.length >= 75 ? b[72] : null,
+      fwMin: b.length >= 75 ? b[73] : null,
+      fwPatch: b.length >= 75 ? b[74] : null,
     );
   }
 }
@@ -1182,6 +1192,7 @@ class _GaugePageState extends State<GaugePage> {
   final c = GaugeController();
   final pc = PageController();
   int page = 0;
+  Size _afrSz = Size.zero;
 
   void _rebuild() {
     if (mounted) setState(() {});
@@ -1193,6 +1204,8 @@ class _GaugePageState extends State<GaugePage> {
     c.init();
     c.addListener(_rebuild);
     Cfg.i.addListener(_rebuild);
+    AfrLog.i.attach(c);
+    AfrLog.i.ensureDefault();   // หน้า AFR LOG ใช้แกนเริ่มต้น 29×25 ได้ทันที (จำลองด้วย DEMO)
   }
 
   @override
@@ -1274,7 +1287,7 @@ class _GaugePageState extends State<GaugePage> {
                       c.graphVisible = i == 2;
                       setState(() => page = i);
                     },
-                    children: [_mainPage(th, blinkOn), _gridPage(th, blinkOn), _graphPage(th), _dragPage(th)],
+                    children: [_mainPage(th, blinkOn), _gridPage(th, blinkOn), _graphPage(th), _afrPage(th), _dragPage(th)],
                   ),
                 ),
               ),
@@ -1286,7 +1299,7 @@ class _GaugePageState extends State<GaugePage> {
           left: 0, right: 0, bottom: 3,
           child: IgnorePointer(
             child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-              for (int i = 0; i < 4; i++)
+              for (int i = 0; i < 5; i++)
                 Container(
                   margin: const EdgeInsets.symmetric(horizontal: 3),
                   width: i == page ? 24 : 14, height: 5,
@@ -1297,7 +1310,7 @@ class _GaugePageState extends State<GaugePage> {
                   ),
                 ),
               const SizedBox(width: 8),
-              Text(const ['GAUGE', 'GRID', 'GRAPH', 'DRAG LOG'][page], style: const TextStyle(fontFamily: kFont, fontSize: 7, color: Colors.white54)),
+              Text(const ['GAUGE', 'GRID', 'GRAPH', 'AFR LOG', 'DRAG LOG'][page], style: const TextStyle(fontFamily: kFont, fontSize: 7, color: Colors.white54)),
             ]),
           ),
         ),
@@ -1367,6 +1380,101 @@ class _GaugePageState extends State<GaugePage> {
         ),
         child: child,
       );
+
+
+  // ----- หน้า AFR LOG (ก่อน DRAG): ตาราง RPM×TPS เหมือน XDF, จำลองด้วย DEMO -----
+  Widget _afrPage(AppTheme th) {
+    final log = AfrLog.i;
+    final live = c.demo || c.ecuLive;
+    return _frame(
+      th,
+      Column(children: [
+        Row(children: [
+          Text('AFR LOG', style: TextStyle(fontFamily: kFont, fontSize: 12, color: th.c, shadows: [Shadow(color: th.c, blurRadius: 8)])),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+                log.ready
+                    ? '${log.rows}×${log.cols} · ${log.src} · ${log.filled} ช่อง${live ? '' : ' · เปิด DEMO เพื่อจำลอง'}'
+                    : 'ยังไม่มีตาราง',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 11, color: live ? Colors.white70 : kAmber)),
+          ),
+          _afrMini(log.rec ? '● REC' : '❚❚', log.rec ? kGreen : kAmber, log.ready ? log.toggleRec : null),
+          const SizedBox(width: 6),
+          _afrMini('ล้าง', th.c,
+              log.ready
+                  ? () async {
+                      if (await askYes(context, 'ล้าง AFR LOG', 'ลบค่าที่บันทึกไว้ทั้งหมด?', ok: 'ล้าง', col: kBad)) log.clear();
+                    }
+                  : null),
+        ]),
+        const SizedBox(height: 6),
+        Expanded(
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: log.ready
+                ? LayoutBuilder(builder: (_, cs) {
+                    _afrSz = Size(cs.maxWidth, cs.maxHeight);
+                    return GestureDetector(
+                      onTapUp: (dd) => _afrTap(dd.localPosition),
+                      child: CustomPaint(size: Size.infinite, painter: _AfrPainter(log, th)),
+                    );
+                  })
+                : const Center(child: Text('ยังไม่มีตาราง', style: TextStyle(color: Colors.white54))),
+          ),
+        ),
+        const SizedBox(height: 4),
+        Row(children: [
+          Container(
+            width: 120, height: 7,
+            decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(4),
+                gradient: LinearGradient(colors: [for (int k = 0; k <= 10; k++) _afrColor(11.5 + k * 0.5)])),
+          ),
+          const SizedBox(width: 6),
+          const Text('11.5 รวย · 14.7 · 16.5 บาง', style: TextStyle(fontSize: 10, color: Colors.white60)),
+          const Spacer(),
+          const Text('กรอบขาว = ตำแหน่งตอนนี้ · แตะช่องดูค่า', style: TextStyle(fontSize: 10, color: Colors.white54)),
+        ]),
+      ]),
+    );
+  }
+
+  Widget _afrMini(String t, Color col, VoidCallback? f) => InkWell(
+        onTap: f,
+        borderRadius: BorderRadius.circular(7),
+        child: Opacity(
+          opacity: f == null ? 0.4 : 1,
+          child: Container(
+            height: 28,
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: Colors.black45,
+              border: Border.all(color: col, width: 1.2),
+              borderRadius: BorderRadius.circular(7),
+            ),
+            child: Text(t, style: TextStyle(fontSize: 12, color: col, fontWeight: FontWeight.bold)),
+          ),
+        ),
+      );
+
+  void _afrTap(Offset p) {
+    final log = AfrLog.i;
+    if (!log.ready) return;
+    final g = _AfrPainter.geom(_afrSz, log.rows, log.cols);
+    final cc = ((p.dx - g.$1) / g.$3).floor(), r = ((p.dy - g.$2) / g.$4).floor();
+    if (r < 0 || cc < 0 || r >= log.rows || cc >= log.cols) return;
+    final v = log.at(r, cc);
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+          duration: const Duration(seconds: 2),
+          content: Text('RPM ${log.rpm[r].toStringAsFixed(0)} · TPS ${log.tps[cc].toStringAsFixed(1)} : '
+              '${v == null ? 'ยังไม่มีข้อมูล' : 'AFR ${v.toStringAsFixed(2)} (${log.cnt[r][cc]} ครั้ง)'}')));
+  }
 
   Widget _dragPage(AppTheme th) {
     final run = c.runs[c.dragSel];
@@ -2313,6 +2421,28 @@ class _SettingsPageState extends State<SettingsPage> {
                             }),
                           ]),
                         ),
+                        const SizedBox(height: 12),
+                        _panel(
+                          th,
+                          'เฟิร์มแวร์',
+                          Builder(builder: (_) {
+                            final fw = widget.c.t.fwText;
+                            final connected = widget.c.link == LinkState.connected;
+                            return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                              _infoRow('เกจ (BLE)',
+                                  !connected ? 'ยังไม่ได้เชื่อมต่อ' : (fw != null ? 'FW $fw' : 'ไม่ทราบ (เฟิร์มแวร์เก่า)'),
+                                  col: !connected ? kAmber : (fw != null ? kGreen : kAmber)),
+                              const SizedBox(height: 6),
+                              _infoRow('แอพออกแบบสำหรับ', 'FW $kAppFw'),
+                              if (connected && fw != null && fw != kAppFw)
+                                const Padding(
+                                  padding: EdgeInsets.only(top: 6),
+                                  child: Text('เวอร์ชันเกจกับแอพไม่ตรงกัน — บางฟีเจอร์อาจทำงานไม่ครบ',
+                                      style: TextStyle(color: kAmber, fontSize: 11)),
+                                ),
+                            ]);
+                          }),
+                        ),
                       ]),
                     ),
                     const SizedBox(width: 12),
@@ -2390,6 +2520,11 @@ class _SettingsPageState extends State<SettingsPage> {
           ]),
         ],
       );
+
+  Widget _infoRow(String a, String b, {Color? col}) => Row(children: [
+        SizedBox(width: 150, child: Text(a, style: const TextStyle(fontSize: 12.5, color: Colors.white60))),
+        Expanded(child: Text(b, style: TextStyle(fontSize: 13, color: col ?? Colors.white, fontWeight: FontWeight.bold))),
+      ]);
 
   Widget _panel(AppTheme th, String title, Widget child) => Container(
         width: double.infinity,
@@ -3604,6 +3739,10 @@ class _TriPainter extends CustomPainter {
 
 // ---------- AFR LOG: เก็บค่า AFR สดลงตาราง RPM × TPS (แกนเดียวกับตารางน้ำมัน) ----------
 // ดูอย่างเดียว ไม่เขียนลง BIN | เก็บเป็นค่าเฉลี่ยสะสมต่อช่อง + จำนวนครั้ง | บันทึกลงเครื่องทุก ~10 วินาที (Documents/afr_log.json)
+// แกนเริ่มต้นของหน้า AFR LOG เมื่อยังไม่ได้เปิด XDF : RPM 29 แถว (1000..9400) × TPS 25 คอลัมน์ (0..100%)
+final List<double> kAfrDefRpm = [for (int i = 0; i < 29; i++) (1000 + i * 300).toDouble()];
+final List<double> kAfrDefTps = [for (int i = 0; i < 25; i++) i * 100 / 24];
+
 class AfrLog extends ChangeNotifier {
   static final AfrLog i = AfrLog._();
   AfrLog._();
@@ -3617,7 +3756,7 @@ class AfrLog extends ChangeNotifier {
   GaugeController? _c;
   Telemetry? _lastT;
   int _lastMs = 0, _saveMs = 0;
-  bool _dirty = false, _loaded = false;
+  bool _dirty = false, _loaded = false, _isDefault = false;
 
   int get rows => rpm.length;
   int get cols => tps.length;
@@ -3633,6 +3772,20 @@ class AfrLog extends ChangeNotifier {
   }
 
   double? at(int r, int c) => cnt[r][c] > 0 ? sum[r][c] / cnt[r][c] : null;
+
+  /// ตั้งแกนเริ่มต้น 29×25 (RPM × TPS) เมื่อยังไม่ได้เปิด XDF — ให้หน้า AFR LOG ใช้งาน/จำลองได้ทันที
+  /// ถ้าเปิด XDF ในหน้า TUNE ภายหลัง syncAxes จะแทนที่ด้วยแกนจริงของตารางน้ำมันเอง
+  void ensureDefault() {
+    if (ready) return;
+    rpm = kAfrDefRpm;
+    tps = kAfrDefTps;
+    src = 'ค่าเริ่มต้น ${kAfrDefRpm.length}×${kAfrDefTps.length}';
+    _isDefault = true;
+    sum = [for (int k = 0; k < rows; k++) List<double>.filled(cols, 0)];
+    cnt = [for (int k = 0; k < rows; k++) List<int>.filled(cols, 0)];
+    _restore();
+    notifyListeners();
+  }
 
   void attach(GaugeController c) {
     if (identical(_c, c)) return;
@@ -3670,10 +3823,11 @@ class AfrLog extends ChangeNotifier {
     final r = s.axisNums(best, !rpmOnRows)!, c = s.axisNums(best, rpmOnRows)!;
     final nr = rpmOnRows ? best.rows : best.cols, nc = rpmOnRows ? best.cols : best.rows;
     final nrpm = r.sublist(0, nr), ntps = c.sublist(0, nc);
-    final same = rows == nr && cols == nc;
+    final same = !_isDefault && rows == nr && cols == nc;
     rpm = nrpm;
     tps = ntps;
     src = best.title;
+    _isDefault = false;
     if (!same) {
       sum = [for (int k = 0; k < nr; k++) List<double>.filled(nc, 0)];
       cnt = [for (int k = 0; k < nr; k++) List<int>.filled(nc, 0)];
