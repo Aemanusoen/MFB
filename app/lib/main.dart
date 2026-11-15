@@ -49,7 +49,7 @@ const kThemes = <AppTheme>[
 
 // เวอร์ชันเฟิร์มแวร์ที่แอพรุ่นนี้ออกแบบมาให้ใช้คู่กัน (แสดงเทียบในหน้า SETTING)
 const kAppFw = '1.0.14';
-const kAppVer = '1.2.0'; // เวอร์ชันแอพ (ตรงกับ pubspec.yaml)
+const kAppVer = '1.2.1'; // เวอร์ชันแอพ (ตรงกับ pubspec.yaml)
 
 // ---------- ค่าคีย์ที่แสดงได้ (เหมือน TEST1 + TOP SPD) ----------
 const int kTps = 0, kTemp = 1, kBatt = 2, kAfr = 3, kInj = 4, kIgn = 5, kRpm = 6, kMap = 7,
@@ -79,6 +79,9 @@ const kAfrHigh = Color(0xFFFF3B3B); // > 14.7 แดง
 const kLogoRed = Color(0xFFFF2A2A);
 
 Color afrColor(double v) => v < 13.0 ? kAfrLow : (v <= 14.7 ? kAfrOk : kAfrHigh);
+
+/// สีแถบอุณหภูมิ: เขียว -> ส้ม (ใกล้ค่าที่ตั้งเตือน 15 °C) -> แดง (ถึง/เกินค่าที่ตั้งเตือน)
+Color tempBarColor(double v, double warn) => v >= warn ? kBad : (v >= warn - 15 ? kAmber : kGreen);
 
 /// สีไล่เฉดเขียว -> เหลือง -> แดง ตามตำแหน่งรอบเครื่อง เทียบกับ SHIFT RPM
 Color rpmColor(double rpm, int shift) {
@@ -1684,7 +1687,7 @@ class _GaugePageState extends State<GaugePage> {
                 gradient: LinearGradient(colors: [for (int k = 0; k <= 10; k++) _afrColor(11.5 + k * 0.5)])),
           ),
           const SizedBox(width: 6),
-          const Text('11.5 รวย · 14.7 · 16.5 บาง', style: TextStyle(fontSize: 10, color: Colors.white60)),
+          const Text('11.5 หนา · 14.7 · 16.5 บาง', style: TextStyle(fontSize: 10, color: Colors.white60)),
           const Spacer(),
           const Text('กรอบขาว = ตำแหน่งตอนนี้ · แตะช่องดูค่า', style: TextStyle(fontSize: 10, color: Colors.white54)),
         ]),
@@ -1958,6 +1961,7 @@ class _GaugePageState extends State<GaugePage> {
 
   // ----- หน้า 3: GRAPH (4 ช่อง แตะเพื่อเปิด/ปิดเส้นกราฟ ค่ายังแสดงในช่องเหมือนเดิม) -----
   static const _gNames = ['RPM', 'TPS', 'GPS', 'AFR'];
+  static const _gTh = ['รอบเครื่อง', 'ลิ้นเร่ง', 'ความเร็ว GPS', 'อากาศ : น้ำมัน'];
 
   // ----- หน้า 6: DTC อ่านโค้ด / ลบโค้ด (ผ่านเกจ, เฉพาะกล่อง Honda) -----
   Widget _dtcPage(AppTheme th) {
@@ -2166,7 +2170,15 @@ class _GaugePageState extends State<GaugePage> {
         ),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-            Text(_gNames[i], style: TextStyle(fontFamily: kFont, fontSize: 9, color: on ? col : Colors.white38)),
+            Flexible(
+              child: Text.rich(
+                TextSpan(children: [
+                  TextSpan(text: _gNames[i], style: TextStyle(fontFamily: kFont, fontSize: 11, color: on ? col : Colors.white38)),
+                  TextSpan(text: '  ${_gTh[i]}', style: TextStyle(fontSize: 11, color: on ? Colors.white60 : Colors.white30)),
+                ]),
+                maxLines: 1, overflow: TextOverflow.ellipsis,
+              ),
+            ),
             Icon(on ? Icons.show_chart : Icons.visibility_off, size: 13, color: on ? col : Colors.white30),
           ]),
           Expanded(
@@ -2193,6 +2205,13 @@ class _GaugePageState extends State<GaugePage> {
     );
   }
 
+  /// ช่วงเต็มแท่ง (ต่ำสุด, สูงสุด) ของช่องที่ใช้แถบสีธีม
+  static const _barRange = <int, (double, double)>{
+    kInj: (0.0, 15.0), kIgn: (0.0, 50.0), kMap: (0.0, 110.0), kSpd: (0.0, 180.0), kTop: (0.0, 180.0),
+    kO2: (0.0, 1.0), kStft: (0.5, 1.5), kLtft: (0.5, 1.5),
+  };
+  static double _frac(double? v, double lo, double hi) => v == null ? 0.0 : ((v - lo) / (hi - lo)).clamp(0.0, 1.0).toDouble();
+
   /// สร้างช่องค่าจากคีย์: สี/บาร์/กระพริบตามกฎ
   Widget _slotTile(int key, VoidCallback onTap, bool blinkOn, {double vs = 30}) {
     final kd = kKeys[key];
@@ -2209,9 +2228,6 @@ class _GaugePageState extends State<GaugePage> {
         bar = v == null ? 0.0 : (v / 100).clamp(0.0, 1.0).toDouble();
         bc = (_) => kTpsBlue;
         break;
-      case kBatt:
-        vc = kBattRed;
-        break;
       case kAfr:
         final col = v == null ? kAfrOk : afrColor(v);
         if (v != null) vc = col;
@@ -2222,10 +2238,26 @@ class _GaugePageState extends State<GaugePage> {
         bar = v == null ? 0.0 : (v / kMaxRpm).clamp(0.0, 1.0).toDouble();
         bc = (p) => rpmColor(p * kMaxRpm, cfg.shift);
         break;
+      case kBatt:
+        vc = kBattRed;
+        bar = _frac(v, 10, 15);
+        bc = (_) => kBattRed;
+        break;
       case kTemp:
       case kEot:
-        alert = v != null && v >= cfg.tempWarn;
+      case kIat:
+        alert = key != kIat && v != null && v >= cfg.tempWarn;
+        final hi = key == kTemp ? 120.0 : (key == kEot ? 150.0 : 80.0);
+        bar = _frac(v, 0, hi);
+        bc = (p) => tempBarColor(p * hi, cfg.tempWarn.toDouble());
         break;
+      default:
+        // ช่องอื่น ๆ: แถบสีธีม ช่วงเต็มแท่งตามชนิดค่า
+        final r = _barRange[key];
+        if (r != null) {
+          bar = _frac(v, r.$1, r.$2);
+          bc = (_) => cfg.t.c;
+        }
     }
     return StatTile(
       th: cfg.t, label: kd.name, unit: kd.unit, value: s, valueColor: vc, thLabel: kd.th,
@@ -2484,7 +2516,7 @@ class StatTile extends StatelessWidget {
                 Flexible(
                   child: Text.rich(
                     TextSpan(children: [
-                      TextSpan(text: label, style: const TextStyle(fontFamily: kFont, fontSize: 9, color: Colors.white)),
+                      TextSpan(text: label, style: const TextStyle(fontFamily: kFont, fontSize: 11, color: Colors.white)),
                       if (thLabel.isNotEmpty) TextSpan(text: '  $thLabel', style: const TextStyle(fontSize: 11, color: Colors.white60)),
                     ]),
                     maxLines: 1, overflow: TextOverflow.ellipsis,
@@ -2809,7 +2841,6 @@ class _SettingsPageState extends State<SettingsPage> {
   // ---- เมนูย่อย CONNECT: สถานะ BLE + ปุ่มเชื่อมต่อ / ตัดการเชื่อมต่อ / ค้นหาเกจ + GPS ----
   Widget _connect(AppTheme th) {
     final c = widget.c;
-    final cfg = Cfg.i;
     final conn = c.link == LinkState.connected;
     final (String, Color, String) st = switch (c.link) {
       LinkState.connected => ('CONNECTED', kGreen, 'เชื่อมต่อกับเกจ ${c.gaugeName ?? ''} แล้ว'),
@@ -2847,11 +2878,6 @@ class _SettingsPageState extends State<SettingsPage> {
         _infoRow('GAUGE FW', c.t.fwText ?? '--'),
         const SizedBox(height: 6),
         _infoRow('GPS', gps, col: c.gpsOk ? kGreen : kAmber),
-        const SizedBox(height: 6),
-        Row(children: [
-          Expanded(child: _infoRow('SPEED SOURCE', cfg.speedGps ? 'GPS (มือถือ)' : 'ECU (กล่อง)')),
-          _action('สลับ', Icons.swap_horiz, th, cfg.toggleSpeed),
-        ]),
       ]),
     );
   }
@@ -2944,11 +2970,11 @@ class _SettingsPageState extends State<SettingsPage> {
                           th,
                           'แจ้งเตือน',
                           Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                            _stepper('SHIFT LIGHT RPM', '${cfg.shift}', () => cfg.addShift(-1000), () => cfg.addShift(1000), th),
+                            _stepper('SHIFT LIGHT RPM', '${cfg.shift}', () => cfg.addShift(-1000), () => cfg.addShift(1000), th, thLabel: 'รอบไฟเตือนเปลี่ยนเกียร์'),
                             const SizedBox(height: 12),
-                            _stepper('TEMP', '${cfg.tempWarn} °C', () => cfg.addTemp(-1), () => cfg.addTemp(1), th),
+                            _stepper('TEMP', '${cfg.tempWarn} °C', () => cfg.addTemp(-1), () => cfg.addTemp(1), th, thLabel: 'อุณหภูมิแจ้งเตือน'),
                             const SizedBox(height: 14),
-                            _action('RESET MIN/MAX', Icons.refresh, th, () {
+                            _action('', Icons.refresh, th, en: 'RESET MIN/MAX', thTxt: 'ล้างค่าต่ำสุด/สูงสุด', () {
                               widget.c.resetMinMax();
                               ScaffoldMessenger.of(context).showSnackBar(
                                   const SnackBar(duration: Duration(seconds: 1), content: Text('รีเซ็ตค่าต่ำสุด/สูงสุดแล้ว')));
@@ -2957,7 +2983,7 @@ class _SettingsPageState extends State<SettingsPage> {
                         ),
       4 => _panel(
                         th,
-                        'โลโก้ MFB-PRO บนบอร์ด (TEST1)',
+                        'เปลี่ยนโลโก้เกจ',
                         Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                           Center(
                             child: Container(
@@ -3050,10 +3076,13 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  Widget _stepper(String label, String value, VoidCallback dec, VoidCallback inc, AppTheme th) => Column(
+  Widget _stepper(String label, String value, VoidCallback dec, VoidCallback inc, AppTheme th, {String thLabel = ''}) => Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(label, style: const TextStyle(fontFamily: kFont, fontSize: 10, color: Colors.white70)),
+          Text.rich(TextSpan(children: [
+            TextSpan(text: label, style: const TextStyle(fontFamily: kFont, fontSize: 11, color: Colors.white)),
+            if (thLabel.isNotEmpty) TextSpan(text: '   $thLabel', style: const TextStyle(fontSize: 10.5, color: Colors.white60)),
+          ])),
           const SizedBox(height: 6),
           Row(children: [
             StepBtn(label: '−', onStep: dec, th: th),
@@ -3114,7 +3143,7 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
-  Widget _action(String s, IconData ic, AppTheme th, VoidCallback f, {bool enabled = true}) => Opacity(
+  Widget _action(String s, IconData ic, AppTheme th, VoidCallback f, {bool enabled = true, String en = '', String thTxt = ''}) => Opacity(
         opacity: enabled ? 1 : 0.4,
         child: InkWell(
           onTap: enabled ? f : null,
@@ -3125,7 +3154,13 @@ class _SettingsPageState extends State<SettingsPage> {
             child: Row(mainAxisSize: MainAxisSize.min, children: [
               Icon(ic, size: 16, color: th.c),
               const SizedBox(width: 6),
-              Text(s, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+              if (en.isNotEmpty)
+                Text.rich(TextSpan(children: [
+                  TextSpan(text: en, style: const TextStyle(fontFamily: kFont, fontSize: 11, color: Colors.white)),
+                  if (thTxt.isNotEmpty) TextSpan(text: '   $thTxt', style: const TextStyle(fontSize: 10.5, color: Colors.white60)),
+                ]))
+              else
+                Text(s, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
             ]),
           ),
         ),
@@ -3567,6 +3602,10 @@ class TuneSession extends ChangeNotifier {
   Uint8List? commit; // ค่าที่กด ✅ บันทึกแล้ว (❌ = กลับไปค่านี้)
   String? binName, xdfName;
   XdfDef? xdf;
+  Uint8List? xdfRaw; // ไบต์ XDF เดิม (ใช้บันทึกคู่กับ BIN เข้าคลังไฟล์)
+  int binSrc = 0, xdfSrc = 0; // แหล่งไฟล์: 0 = ยังไม่เปิด, 1 = ไฟล์ในแอป (ORIGINAL), 2 = ผู้ใช้เลือกเอง (มือถือ/คลังไฟล์)
+  int lastClamp = 0; // จำนวนช่องที่ชนค่าสุดของข้อมูลในการเขียนครั้งล่าสุด
+  double clampLo = 0, clampHi = 0;
   int sel = -1;
   bool lockOk = false; // ผู้ใช้ยืนยันปลดล็อกการแก้รหัสล็อคกล่องแล้ว (เฉพาะรอบนี้)
   final List<_Edit> undoList = [], redoList = [];
@@ -3585,7 +3624,8 @@ class TuneSession extends ChangeNotifier {
     notifyListeners();
   }
 
-  void loadBin(String name, Uint8List b) {
+  void loadBin(String name, Uint8List b, {int src = 2}) {
+    binSrc = src;
     orig = Uint8List.fromList(b);
     bin = Uint8List.fromList(b);
     commit = Uint8List.fromList(b);
@@ -3597,7 +3637,9 @@ class TuneSession extends ChangeNotifier {
     _changed();
   }
 
-  void loadXdf(String name, XdfDef d) {
+  void loadXdf(String name, XdfDef d, {int src = 2, Uint8List? raw}) {
+    xdfSrc = src;
+    xdfRaw = raw == null ? null : Uint8List.fromList(raw);
     xdf = d;
     xdfName = name;
     sel = -1;
@@ -3629,6 +3671,7 @@ class TuneSession extends ChangeNotifier {
   }
 
   void clearBin() {
+    binSrc = 0;
     orig = null;
     bin = null;
     commit = null;
@@ -3640,6 +3683,8 @@ class TuneSession extends ChangeNotifier {
   }
 
   void clearXdf() {
+    xdfSrc = 0;
+    xdfRaw = null;
     xdf = null;
     xdfName = null;
     sel = -1;
@@ -3834,10 +3879,16 @@ class TuneSession extends ChangeNotifier {
     final maxRaw = d.signed ? (1 << (nb - 1)) - 1 : (1 << nb) - 1;
     final minRaw = d.signed ? -(1 << (nb - 1)) : 0;
     final addr = <int>[], before = <int>[], after = <int>[];
+    lastClamp = 0;
+    final e0 = t.eq.f(minRaw.toDouble()), e1 = t.eq.f(maxRaw.toDouble());
+    clampLo = math.min(e0, e1);
+    clampHi = math.max(e0, e1);
     vals.forEach((rc, v) {
       final x = t.eq.inv(v, minRaw.toDouble(), maxRaw.toDouble());
       if (!x.isFinite) return;
-      final raw = x.round().clamp(minRaw, maxRaw).toInt();
+      final xr = x.round();
+      if (xr < minRaw || xr > maxRaw) lastClamp++; // เกินที่ข้อมูลเก็บได้ -> ตั้งไว้ที่ขอบ
+      final raw = xr.clamp(minRaw, maxRaw).toInt();
       _rawBytes(d, d.addrOf(rc.$1, rc.$2), raw, addr, before, after);
     });
     return _commit(label, addr, before, after, merge);
@@ -3973,11 +4024,16 @@ class TuneSession extends ChangeNotifier {
   String newFileName() {
     final n = binName ?? 'tune.bin';
     final dot = n.lastIndexOf('.');
-    final stem = dot > 0 ? n.substring(0, dot) : n;
-    final d = DateTime.now();
-    String p2(int v) => v.toString().padLeft(2, '0');
-    return '${stem}_MFB_${d.year}${p2(d.month)}${p2(d.day)}_${p2(d.hour)}${p2(d.minute)}.bin';
+    var stem = dot > 0 ? n.substring(0, dot) : n;
+    stem = stem.replaceAll(RegExp(r'_MFB_\d{8}_\d{4}$'), '').replaceAll(RegExp(r'_\d+$'), ''); // ตัดวันที่/เลขลำดับเดิมออก
+    if (stem.isEmpty) stem = 'tune';
+    int k = 1;
+    while (BinLib.i.exists('${stem}_$k')) {
+      k++;
+    }
+    return '${stem}_$k.bin';
   }
+
 }
 
 /// หาตำแหน่ง (ทศนิยม) ของค่า v บนแกน a (รองรับแกนเรียงขึ้นหรือลง) ; อยู่นอกช่วง = ปลายที่ใกล้สุด
@@ -4477,7 +4533,7 @@ class AfrLog extends ChangeNotifier {
   void flush() => _save();
 }
 
-/// สี AFR: รวย (ต่ำ) = แดง .. 14.7 = เขียว .. บาง (สูง) = ฟ้า/น้ำเงิน
+/// สี AFR: หนา (ต่ำ) = แดง .. 14.7 = เขียว .. บาง (สูง) = ฟ้า/น้ำเงิน
 Color _afrColor(double v) {
   const stops = <Color>[Color(0xFFD81B3C), Color(0xFFF0961E), Color(0xFF2ED278), Color(0xFF2896E8), Color(0xFF505ADC)];
   final t = ((v - 11.5) / (16.5 - 11.5)).clamp(0.0, 1.0).toDouble();
@@ -4623,7 +4679,7 @@ class _AfrLogPageState extends State<AfrLogPage> {
                       gradient: LinearGradient(colors: [for (int k = 0; k <= 10; k++) _afrColor(11.5 + k * 0.5)])),
                 ),
                 const SizedBox(width: 6),
-                const Text('11.5 รวย · 14.7 · 16.5 บาง', style: TextStyle(fontSize: 10.5, color: Colors.white60)),
+                const Text('11.5 หนา · 14.7 · 16.5 บาง', style: TextStyle(fontSize: 10.5, color: Colors.white60)),
                 const Spacer(),
                 const Text('ช่องทึบ = บันทึกหลายครั้ง · ช่องมืด = ยังไม่มีข้อมูล · กรอบขาว = ตำแหน่งเครื่องตอนนี้ · แตะช่อง = ดูรายละเอียด',
                     style: TextStyle(fontSize: 10.5, color: Colors.white54)),
@@ -4739,6 +4795,7 @@ class _TunePageState extends State<TunePage> {
   bool view3d = false, live = true;
   int stepMul = 1;
   double yaw = -0.85, pitch = 0.62, zoom = 1, _zoom0 = 1;
+  Offset pan3 = Offset.zero, _pan0 = Offset.zero, _mid0 = Offset.zero; // 2 นิ้วลาก = เลื่อนกราฟ 3D
   Timer? _spin;
   bool _adjOpen = false; // แผง "ปรับค่า" กางอยู่
   final _adjKey = GlobalKey(), _bodyKey = GlobalKey();
@@ -4779,6 +4836,9 @@ class _TunePageState extends State<TunePage> {
   @override
   void dispose() {
     _spin?.cancel();
+    _toastT?.cancel();
+    _toastE?.remove();
+    _toastE = null;
     s.removeListener(_rebuild);
     s.removeListener(_syncAfr);
     Cfg.i.removeListener(_rebuild);
@@ -4880,6 +4940,7 @@ class _TunePageState extends State<TunePage> {
         yaw = -0.85;
         pitch = 0.62;
         zoom = 1;
+        pan3 = Offset.zero;
         return;
       }
       final w = view.width - hw, h = view.height - hh;
@@ -5073,7 +5134,37 @@ class _TunePageState extends State<TunePage> {
     return true;
   }
 
-  double _step(XdfTable t) => t.eq.lsb * stepMul;
+
+  // ป๊อปอัพเตือนเล็ก ๆ กลางจอ แล้วจางหายเอง (~1.5 วิ)
+  OverlayEntry? _toastE;
+  Timer? _toastT;
+  void _toast(String m, {Color col = kAmber}) {
+    _toastT?.cancel();
+    _toastE?.remove();
+    _toastE = null;
+    if (!mounted) return;
+    final e = OverlayEntry(builder: (_) => IgnorePointer(child: Center(child: _FadeToast(msg: m, col: col))));
+    _toastE = e;
+    Overlay.of(context).insert(e);
+    _toastT = Timer(const Duration(milliseconds: 1600), () {
+      e.remove();
+      if (_toastE == e) _toastE = null;
+    });
+  }
+
+  /// ค่าในช่อง "ใส่ค่าที่ต้องการ" — ว่าง = เด้งเตือน (บอกช่วงที่แนะนำของปุ่มนั้น แต่ไม่บังคับ)
+  double? _need(String btn, String hint) {
+    final a = _amt;
+    if (a == null) _toast('ใส่ค่าก่อน · $btn แนะนำ $hint');
+    return a;
+  }
+
+  /// เขียนค่า + เตือนถ้ามีช่องชนค่าสุดของข้อมูล (ปรับได้อิสระถึงค่าต่ำสุด/สูงสุดที่ข้อมูลเก็บได้)
+  int _w(XdfTable t, Map<(int, int), double> vals, String label, {bool merge = false}) {
+    final n = s.write(t, vals, label, merge: merge);
+    if (s.lastClamp > 0) _toast('${s.lastClamp} ช่องชนค่าสุดของข้อมูล (${t.fmt(s.clampLo)} – ${t.fmt(s.clampHi)})');
+    return n;
+  }
 
   /// ค่าในช่อง "ค่า" (ว่าง = null) รับเลขฐาน 16 แบบ 0x41 ได้
   double? get _amt {
@@ -5085,10 +5176,11 @@ class _TunePageState extends State<TunePage> {
 
   Future<void> _bump(int dir) async {
     final t = s.table;
-    if (t == null || !_needSel() || !await _canEdit(t)) return;
-    final a = _amt;
-    final st = (a != null && a != 0) ? a.abs() : _step(t);
-    s.write(t, {for (final rc in _cells) rc: s.val(t, rc.$1, rc.$2) + dir * st}, '${dir > 0 ? '+' : '−'} ${_numStr(st)}', merge: true);
+    if (t == null || !_needSel()) return;
+    final a = _need('− / +', '-100 – 100');
+    if (a == null || !await _canEdit(t)) return;
+    final d = dir * a; // + = บวกค่าที่ใส่, − = ลบค่าที่ใส่ (ใส่ค่าติดลบได้)
+    _w(t, {for (final rc in _cells) rc: s.val(t, rc.$1, rc.$2) + d}, '${dir > 0 ? '+' : '−'} ${_numStr(a)}', merge: true);
   }
 
   Future<double?> _askNum(String title, String hint, {String initial = ''}) async {
@@ -5124,10 +5216,10 @@ class _TunePageState extends State<TunePage> {
 
   Future<void> _pct() async {
     final t = s.table;
-    if (t == null || !_needSel() || !await _canEdit(t)) return;
-    final p = _amt ?? await _askNum('เปลี่ยนเป็น %', 'เช่น 5 = เพิ่ม 5% , -3 = ลด 3%');
-    if (p == null) return;
-    final n = s.write(t, {for (final rc in _cells) rc: s.val(t, rc.$1, rc.$2) * (1 + p / 100)}, '% ${_numStr(p)}');
+    if (t == null || !_needSel()) return;
+    final p = _need('%', '-100 – 100');
+    if (p == null || !await _canEdit(t)) return;
+    final n = _w(t, {for (final rc in _cells) rc: s.val(t, rc.$1, rc.$2) * (1 + p / 100)}, '% ${_numStr(p)}');
     if (n == 0) _snack('ค่าไม่เปลี่ยน (น้อยกว่า 1 ขั้นของข้อมูล)');
   }
 
@@ -5153,48 +5245,66 @@ class _TunePageState extends State<TunePage> {
   }
 
   /// mode 0 = X (ไล่ตามแนวนอนในแต่ละแถว), 1 = Y (ไล่ตามแนวตั้งในแต่ละคอลัมน์), 2 = XY (ยึด 4 มุม ไล่ทั้งสองแกน)
+  /// ค่าในช่อง = ความแรง (1 = 100% ไล่เต็ม, 0.5 = ขยับครึ่งทางจากค่าเดิมไปหาค่าที่ไล่)
+  /// เลือกคอลัมน์/แถวเดียวได้: ใช้คอลัมน์ซ้าย-ขวา / แถวบน-ล่าง ที่อยู่นอกส่วนที่เลือกเป็นจุดยึด
   Future<void> _interp(int mode) async {
     final t = s.table;
     final g = _sel;
-    if (t == null || g == null || !_needSel() || !await _canEdit(t)) return;
+    if (t == null || g == null || !_needSel()) return;
+    const names = ['X', 'Y', 'XY'];
+    final k = _need(names[mode], '0 – 1 (1 = 100%)');
+    if (k == null || !await _canEdit(t)) return;
     final (r0, c0, r1, c1) = g;
-    if ((mode == 0 || mode == 2) && c1 == c0) {
-      _snack('เลือกอย่างน้อย 2 คอลัมน์');
-      return;
+    int ca = c0, cb = c1, ra = r0, rb = r1;
+    if (mode != 1 && c1 == c0) {
+      ca = c0 - 1;
+      cb = c1 + 1;
+      if (ca < 0 || cb >= t.cols) {
+        _toast('คอลัมน์ติดขอบตาราง — ไม่มีช่องซ้าย-ขวาให้ไล่ค่า');
+        return;
+      }
     }
-    if ((mode == 1 || mode == 2) && r1 == r0) {
-      _snack('เลือกอย่างน้อย 2 แถว');
-      return;
+    if (mode != 0 && r1 == r0) {
+      ra = r0 - 1;
+      rb = r1 + 1;
+      if (ra < 0 || rb >= t.rows) {
+        _toast('แถวติดขอบตาราง — ไม่มีช่องบน-ล่างให้ไล่ค่า');
+        return;
+      }
     }
     final px = _axisPos(t, true), py = _axisPos(t, false);
-    double fx(int c) => (px[c] - px[c0]) / (px[c1] - px[c0]);
-    double fy(int r) => (py[r] - py[r0]) / (py[r1] - py[r0]);
+    double fx(int c) => px[cb] == px[ca] ? 0 : (px[c] - px[ca]) / (px[cb] - px[ca]);
+    double fy(int r) => py[rb] == py[ra] ? 0 : (py[r] - py[ra]) / (py[rb] - py[ra]);
     final out = <(int, int), double>{};
-    final v00 = s.val(t, r0, c0), v01 = s.val(t, r0, c1), v10 = s.val(t, r1, c0), v11 = s.val(t, r1, c1);
+    final v00 = s.val(t, ra, ca), v01 = s.val(t, ra, cb), v10 = s.val(t, rb, ca), v11 = s.val(t, rb, cb);
     for (int r = r0; r <= r1; r++) {
       for (int c = c0; c <= c1; c++) {
         double v;
         if (mode == 0) {
-          final a = s.val(t, r, c0), b = s.val(t, r, c1), f = fx(c);
+          final a = s.val(t, r, ca), b = s.val(t, r, cb), f = fx(c);
           v = a + (b - a) * f;
         } else if (mode == 1) {
-          final a = s.val(t, r0, c), b = s.val(t, r1, c), f = fy(r);
+          final a = s.val(t, ra, c), b = s.val(t, rb, c), f = fy(r);
           v = a + (b - a) * f;
         } else {
           final u = fx(c), w = fy(r);
           v = v00 * (1 - u) * (1 - w) + v01 * u * (1 - w) + v10 * (1 - u) * w + v11 * u * w;
         }
-        out[(r, c)] = v;
+        final old = s.val(t, r, c);
+        out[(r, c)] = old + (v - old) * k;
       }
     }
-    final n = s.write(t, out, const ['ไล่ค่า X', 'ไล่ค่า Y', 'ไล่ค่า XY'][mode]);
+    final n = _w(t, out, 'ไล่ค่า ${names[mode]} ×${_numStr(k)}');
     if (n == 0) _snack('ค่าไม่เปลี่ยน');
   }
 
-  /// ~ smooth: แต่ละช่องที่เลือก = ค่าเฉลี่ยของตัวเองกับช่องรอบข้าง 8 ช่อง (อ่านค่าเดิมก่อนแก้ทั้งหมด)
+  /// ~ smooth: แต่ละช่องที่เลือกขยับเข้าหาค่าเฉลี่ยของตัวเองกับช่องรอบข้าง 8 ช่อง (อ่านค่าเดิมก่อนแก้ทั้งหมด)
+  /// ค่าในช่อง = ความแรง (แนะนำ 0.01 – 0.10 ; 1 = เท่าค่าเฉลี่ยเต็ม ๆ)
   Future<void> _smooth() async {
     final t = s.table;
-    if (t == null || !_needSel() || !await _canEdit(t)) return;
+    if (t == null || !_needSel()) return;
+    final k = _need('~', '0.01 – 0.10');
+    if (k == null || !await _canEdit(t)) return;
     final out = <(int, int), double>{};
     for (final rc in _cells) {
       double sum = 0;
@@ -5209,10 +5319,13 @@ class _TunePageState extends State<TunePage> {
           n++;
         }
       }
-      if (n > 0) out[rc] = sum / n;
+      if (n > 0) {
+        final old = s.val(t, rc.$1, rc.$2);
+        out[rc] = old + (sum / n - old) * k;
+      }
     }
-    final k = s.write(t, out, '~ smooth ${out.length} ช่อง');
-    if (k == 0) _snack('ค่าไม่เปลี่ยน (เรียบอยู่แล้ว หรือน้อยกว่า 1 ขั้นของข้อมูล)');
+    final w = _w(t, out, '~ smooth ×${_numStr(k)} ${out.length} ช่อง');
+    if (w == 0) _snack('ค่าไม่เปลี่ยน (เรียบอยู่แล้ว หรือน้อยกว่า 1 ขั้นของข้อมูล)');
   }
 
   static List<List<double>>? _clip; // คลิปบอร์ด (คงอยู่ระหว่างเปลี่ยนตาราง)
@@ -5251,7 +5364,7 @@ class _TunePageState extends State<TunePage> {
     }
     final rows = cb.length, cols = cb[0].length;
     final cut = out.length < rows * cols;
-    final n = s.write(t, out, 'วาง ${rows}×$cols');
+    final n = _w(t, out, 'วาง ${rows}×$cols');
     setState(() {
       a0 = (g.$1, g.$2);
       a1 = (math.min(t.rows - 1, g.$1 + rows - 1), math.min(t.cols - 1, g.$2 + cols - 1));
@@ -5263,13 +5376,20 @@ class _TunePageState extends State<TunePage> {
 
   Future<void> _setVal({bool ask = false}) async {
     final t = s.table;
-    if (t == null || !_needSel() || !await _canEdit(t)) return;
+    if (t == null || !_needSel()) return;
     final cells = _cells;
-    final avg = cells.map((rc) => s.val(t, rc.$1, rc.$2)).reduce((a, b) => a + b) / cells.length;
-    final v = (ask ? null : _amt) ??
-        await _askNum('ใส่ค่า (${cells.length} ช่อง)', t.outType == 3 ? 'เช่น 65 หรือ 0x41' : 'ค่าใหม่', initial: t.fmt(avg));
+    double? v;
+    if (ask) {
+      // แตะช่องเดิม 2 ครั้ง = ถามค่าใหม่ (เหมือนเดิม)
+      if (!await _canEdit(t)) return;
+      final avg = cells.map((rc) => s.val(t, rc.$1, rc.$2)).reduce((a, b) => a + b) / cells.length;
+      v = await _askNum('ใส่ค่า (${cells.length} ช่อง)', t.outType == 3 ? 'เช่น 65 หรือ 0x41' : 'ค่าใหม่', initial: t.fmt(avg));
+    } else {
+      v = _need('=', '-100 – 1000');
+      if (v == null || !await _canEdit(t)) return;
+    }
     if (v == null) return;
-    s.write(t, {for (final rc in cells) rc: v}, '= ${_numStr(v)}');
+    _w(t, {for (final rc in cells) rc: v}, '= ${_numStr(v)}');
   }
 
   void _undo() {
@@ -5390,7 +5510,7 @@ class _TunePageState extends State<TunePage> {
       final f = await pickFileExt('xdf', _snack, anyName: true);   // ไฟล์ XDF ทุกชื่อ/นามสกุล — ตรวจจากเนื้อไฟล์
       if (f == null) return;
       final d = XdfDef.parse(f.$2);
-      s.loadXdf(f.$1, d);
+      s.loadXdf(f.$1, d, raw: f.$2);
       setState(_resetView);
       _snack('XDF: ${d.tables.length} ตาราง (2D ${d.tables.where((t) => t.is2D).length}) + ${d.flags.length} FLAGS');
     } on XdfError catch (e) {
@@ -5400,10 +5520,18 @@ class _TunePageState extends State<TunePage> {
     }
   }
 
+  /// โหมดปุ่ม "เลือกจากแอป": 0 = BIN+XDF, 1 = เฉพาะ BIN (มี XDF จากภายนอกแล้ว), 2 = เฉพาะ XDF (มี BIN จากภายนอกแล้ว)
+  int get _pickMode => (s.binSrc == 2 && s.xdfSrc != 2) ? 2 : ((s.xdfSrc == 2 && s.binSrc != 2) ? 1 : 0);
+  String get _pickLabel => const ['เลือก BIN/XDF จากแอป', 'เลือก BIN จากแอป', 'เลือก XDF จากแอป'][_pickMode];
+  static int _origSort = 0; // 0 = รุ่นรถ, 1 = ขนาดไฟล์ มาก-น้อย, 2 = ขนาดไฟล์ น้อย-มาก (จำไว้ระหว่างเปิดหน้าต่าง)
+
   /// เลือก BIN + XDF ต้นฉบับ (ORIGINAL) ที่มากับแอพ — จับคู่ตาม ID กล่อง, ไม่แฟลชอัตโนมัติ
+  /// ถ้าเปิด BIN หรือ XDF จากภายนอกไว้อย่างใดอย่างหนึ่ง จะโหลดจากแอปเฉพาะอีกไฟล์ (ไม่แทนที่ไฟล์ที่เปิดไว้)
   Future<void> _openOriginals() async {
     final th = Cfg.i.t;
     final ecm = c.t.fl?.ecm; // ID กล่องที่ต่ออยู่ (null = ยังไม่ต่อ/ยังอ่านไม่ได้)
+    final mode = _pickMode;
+    final title = _pickLabel;
     final p = await showDialog<OrigPack>(
       context: context,
       barrierColor: Colors.black54,
@@ -5422,106 +5550,138 @@ class _TunePageState extends State<TunePage> {
             final k = q.trim().toLowerCase();
             list = [for (final o in list) if (('${o.model} ${o.name} ${ecmHex(o.ecuId)}').toLowerCase().contains(k)) o];
           }
-          list.sort((a, b) => (a.model.isEmpty ? a.name : a.model).compareTo(b.model.isEmpty ? b.name : b.model)); // เรียงตามรุ่นรถ
+          String nm(OrigPack o) => o.model.isEmpty ? o.name : o.model;
+          int size(OrigPack o) => mode == 2 ? o.xdfKb * 100000 + o.binKb : o.binKb * 100000 + o.xdfKb; // เลือกเฉพาะ XDF = เรียงตามขนาด XDF
+          list.sort((a, b) => switch (_origSort) {
+                1 => size(b).compareTo(size(a)) != 0 ? size(b).compareTo(size(a)) : nm(a).compareTo(nm(b)),
+                2 => size(a).compareTo(size(b)) != 0 ? size(a).compareTo(size(b)) : nm(a).compareTo(nm(b)),
+                _ => nm(a).compareTo(nm(b)),
+              });
 
           Widget hbtn(IconData ic, Color bc, Color fc, VoidCallback onTap) => InkWell(
                 onTap: onTap,
-                borderRadius: BorderRadius.circular(12),
+                borderRadius: BorderRadius.circular(9),
                 child: Container(
-                  width: 46,
-                  height: 46,
-                  decoration: BoxDecoration(color: const Color(0xFF12161C), border: Border.all(color: bc), borderRadius: BorderRadius.circular(12)),
-                  child: Icon(ic, color: fc, size: 20),
+                  width: 34,
+                  height: 34,
+                  decoration: BoxDecoration(color: const Color(0xFF12161C), border: Border.all(color: bc), borderRadius: BorderRadius.circular(9)),
+                  child: Icon(ic, color: fc, size: 16),
                 ),
               );
           Widget tabBtn(String t, int i) => Expanded(
                 child: InkWell(
                   onTap: () => setM(() => tab = i),
-                  borderRadius: BorderRadius.circular(12),
+                  borderRadius: BorderRadius.circular(9),
                   child: Container(
-                    height: 46,
+                    height: 30,
                     alignment: Alignment.center,
                     decoration: BoxDecoration(
                       color: tab == i ? th.c.withOpacity(0.18) : const Color(0xFF12161C),
-                      border: Border.all(color: tab == i ? th.c : Colors.white24, width: tab == i ? 1.4 : 1),
-                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: tab == i ? th.c : Colors.white24, width: tab == i ? 1.3 : 1),
+                      borderRadius: BorderRadius.circular(9),
                     ),
-                    child: Text(t, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: tab == i ? Colors.white : Colors.white60)),
+                    child: Text(t, style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: tab == i ? Colors.white : Colors.white60)),
+                  ),
+                ),
+              );
+          Widget sortBtn(String t, bool on, VoidCallback f) => Padding(
+                padding: const EdgeInsets.only(left: 6),
+                child: InkWell(
+                  onTap: f,
+                  borderRadius: BorderRadius.circular(8),
+                  child: Container(
+                    height: 26,
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: on ? th.c.withOpacity(0.22) : const Color(0xFF12161C),
+                      border: Border.all(color: on ? th.c2 : Colors.white24),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(t, style: TextStyle(fontSize: 11.5, color: on ? Colors.white : Colors.white70)),
                   ),
                 ),
               );
           Widget card(OrigPack o) {
             final on = o.matches(ecm);
+            final szTxt = switch (mode) {
+              1 => 'BIN ${o.binKb} KB · ใช้เฉพาะ BIN',
+              2 => 'XDF ${o.xdfKb} KB · ใช้เฉพาะ XDF',
+              _ => 'BIN ${o.binKb} KB · XDF ${o.xdfKb} KB',
+            };
             return InkWell(
               onTap: () => Navigator.of(dctx).pop(o),
-              borderRadius: BorderRadius.circular(14),
+              borderRadius: BorderRadius.circular(10),
               child: Container(
-                margin: const EdgeInsets.only(bottom: 9),
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                margin: const EdgeInsets.only(bottom: 5),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                 decoration: BoxDecoration(
                   color: on ? const Color(0xFF0E1D16) : const Color(0xFF0F1013),
                   border: Border.all(color: on ? kGreen.withOpacity(0.7) : Colors.white12),
-                  borderRadius: BorderRadius.circular(14),
+                  borderRadius: BorderRadius.circular(10),
                 ),
                 child: Row(children: [
-                  Expanded(
-                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      RichText(
-                        text: TextSpan(style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white), children: [
-                          TextSpan(text: o.model.isEmpty ? o.name : o.model.split(' (').first),
-                          TextSpan(text: '  ${o.name}', style: const TextStyle(fontSize: 14, color: Colors.white70)),
-                        ]),
-                      ),
-                      const SizedBox(height: 3),
-                      Text('BIN ${o.binKb} KB · XDF ${o.xdfKb} KB', style: const TextStyle(fontSize: 12.5, color: Colors.white54)),
+                  RichText(
+                    text: TextSpan(style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.bold, color: Colors.white), children: [
+                      TextSpan(text: o.model.isEmpty ? o.name : o.model.split(' (').first),
+                      TextSpan(text: '  ${o.name}', style: const TextStyle(fontSize: 12, color: Colors.white70, fontWeight: FontWeight.normal)),
                     ]),
                   ),
+                  const SizedBox(width: 10),
+                  Expanded(child: Text(szTxt, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 11, color: Colors.white54))),
                   if (o.ecuId != null)
                     Container(
-                      margin: const EdgeInsets.only(left: 8),
-                      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+                      margin: const EdgeInsets.only(left: 6),
+                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 1),
                       decoration: BoxDecoration(
                         border: Border.all(color: on ? kGreen.withOpacity(0.7) : Colors.white24),
-                        borderRadius: BorderRadius.circular(7),
+                        borderRadius: BorderRadius.circular(6),
                       ),
-                      child: Text(ecmHex(o.ecuId), style: TextStyle(fontSize: 11, color: on ? kGreen : Colors.white54)),
+                      child: Text(ecmHex(o.ecuId), style: TextStyle(fontSize: 10, color: on ? kGreen : Colors.white54)),
                     ),
                   Padding(
                     padding: const EdgeInsets.only(left: 6),
-                    child: Icon(on ? Icons.check : Icons.chevron_right, color: on ? kGreen : th.c, size: 20),
+                    child: Icon(on ? Icons.check : Icons.chevron_right, color: on ? kGreen : th.c, size: 16),
                   ),
                 ]),
               ),
             );
           }
 
+          final sub = switch (mode) {
+            1 => 'ใช้คู่กับ XDF: ${s.xdfName ?? '-'} (จากภายนอก) · XDF ไม่ถูกเปลี่ยน',
+            2 => 'ใช้คู่กับ BIN: ${s.binName ?? '-'} (จากภายนอก) · BIN ไม่ถูกเปลี่ยน',
+            _ => '',
+          };
           return Dialog(
             backgroundColor: const Color(0xFF0C0D10),
-            insetPadding: EdgeInsets.symmetric(horizontal: sz.width * 0.1, vertical: 26),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20), side: BorderSide(color: th.c, width: 1.2)),
+            insetPadding: EdgeInsets.symmetric(horizontal: sz.width * 0.1, vertical: 12),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16), side: BorderSide(color: th.c, width: 1.2)),
             child: Column(mainAxisSize: MainAxisSize.min, children: [
-              // หัว
+              // หัว (ย่อให้เตี้ย เพื่อให้เห็นรายการไฟล์ได้มากขึ้น)
               Container(
-                padding: const EdgeInsets.fromLTRB(20, 16, 20, 14),
+                padding: const EdgeInsets.fromLTRB(14, 9, 14, 8),
                 decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: Color(0xFF1A1114)))),
                 child: Row(children: [
                   Container(
-                    width: 50,
-                    height: 50,
-                    decoration: BoxDecoration(color: const Color(0xFF15090B), border: Border.all(color: th.c), borderRadius: BorderRadius.circular(14)),
-                    child: Icon(Icons.memory, color: th.c, size: 24),
+                    width: 34,
+                    height: 34,
+                    decoration: BoxDecoration(color: const Color(0xFF15090B), border: Border.all(color: th.c), borderRadius: BorderRadius.circular(9)),
+                    child: Icon(Icons.memory, color: th.c, size: 18),
                   ),
-                  const SizedBox(width: 14),
+                  const SizedBox(width: 10),
                   Expanded(
                     child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      const Text('เลือก BIN/XDF จากแอป', style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800)),
-                      const SizedBox(height: 2),
-                      RichText(
-                        text: const TextSpan(style: TextStyle(fontSize: 12.5, color: Colors.white60), children: [
-                          TextSpan(text: 'จับคู่เฉพาะรหัส ECU ที่ยืนยันได้ · '),
-                          TextSpan(text: 'ไม่แฟลชอัตโนมัติ', style: TextStyle(color: Color(0xFFFF7A7C), fontWeight: FontWeight.w600)),
-                        ]),
-                      ),
+                      Text(title, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
+                      if (sub.isNotEmpty)
+                        Text(sub, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 10.5, color: Colors.white60))
+                      else
+                        RichText(
+                          text: const TextSpan(style: TextStyle(fontSize: 10.5, color: Colors.white60), children: [
+                            TextSpan(text: 'จับคู่เฉพาะรหัส ECU ที่ยืนยันได้ · '),
+                            TextSpan(text: 'ไม่แฟลชอัตโนมัติ', style: TextStyle(color: Color(0xFFFF7A7C), fontWeight: FontWeight.w600)),
+                          ]),
+                        ),
                     ]),
                   ),
                   hbtn(searching ? Icons.search_off : Icons.search, Colors.white24, Colors.white70, () => setM(() {
@@ -5531,69 +5691,81 @@ class _TunePageState extends State<TunePage> {
                           qCtl.clear();
                         }
                       })),
-                  const SizedBox(width: 8),
+                  const SizedBox(width: 6),
                   hbtn(Icons.close, th.c, const Color(0xFFFF6B6E), () => Navigator.of(dctx).pop()),
                 ]),
               ),
               // แท็บ
               Padding(
-                padding: const EdgeInsets.fromLTRB(20, 14, 20, 8),
-                child: Row(children: [tabBtn('ไฟล์สำหรับรถคันนี้', 0), const SizedBox(width: 12), tabBtn('ไฟล์ทั้งหมด', 1)]),
+                padding: const EdgeInsets.fromLTRB(14, 8, 14, 6),
+                child: Row(children: [tabBtn('ไฟล์สำหรับรถคันนี้', 0), const SizedBox(width: 8), tabBtn('ไฟล์ทั้งหมด', 1)]),
               ),
               // ช่องค้นหา (เมื่อเปิด)
               if (searching)
                 Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 6),
+                  padding: const EdgeInsets.fromLTRB(14, 0, 14, 6),
                   child: TextField(
                     controller: qCtl,
                     autofocus: true,
-                    style: const TextStyle(fontSize: 14),
+                    style: const TextStyle(fontSize: 13),
                     onChanged: (v) => setM(() => q = v),
                     decoration: InputDecoration(
                       isDense: true,
                       hintText: 'ค้นหารุ่น / รหัส ECU',
-                      prefixIcon: const Icon(Icons.search, size: 18),
+                      prefixIcon: const Icon(Icons.search, size: 16),
                       filled: true,
                       fillColor: const Color(0xFF12161C),
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide(color: th.c.withOpacity(0.5))),
-                      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: Colors.white24)),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(9), borderSide: BorderSide(color: th.c.withOpacity(0.5))),
+                      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(9), borderSide: const BorderSide(color: Colors.white24)),
                     ),
                   ),
                 ),
-              // บรรทัดสรุป + สถานะการต่อ
+              // บรรทัดสรุป + สถานะการต่อ + ปุ่มเรียง
               Padding(
-                padding: const EdgeInsets.fromLTRB(22, 2, 22, 10),
+                padding: const EdgeInsets.fromLTRB(14, 0, 14, 6),
                 child: Row(children: [
-                  Expanded(child: Text('แสดง ${list.length}/${kOriginals.length} ชุด · เรียงตาม รุ่นรถ', style: const TextStyle(fontSize: 13, color: Colors.white54))),
-                  Text(
-                    ecm != null ? '● ต่อ ECU: ${ecuModelName(ecm) ?? 'ไม่ทราบรุ่น'} · ${ecmHex(ecm)}' : '● ยังไม่เชื่อมต่อ ECU',
-                    style: TextStyle(fontSize: 12.5, color: ecm != null ? kGreen : Colors.white38),
+                  Expanded(
+                    child: Text.rich(
+                      TextSpan(style: const TextStyle(fontSize: 11, color: Colors.white54), children: [
+                        TextSpan(text: 'แสดง ${list.length}/${kOriginals.length} ชุด · '),
+                        TextSpan(
+                          text: ecm != null ? '● ต่อ ECU: ${ecuModelName(ecm) ?? 'ไม่ทราบรุ่น'}' : '● ยังไม่เชื่อมต่อ ECU',
+                          style: TextStyle(color: ecm != null ? kGreen : Colors.white38),
+                        ),
+                      ]),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
                   ),
+                  const Text('เรียง:', style: TextStyle(fontSize: 11, color: Colors.white38)),
+                  sortBtn('รุ่นรถ', _origSort == 0, () => setM(() => _origSort = 0)),
+                  sortBtn(_origSort == 2 ? '↑ ขนาด น้อย-มาก' : '↓ ขนาด มาก-น้อย', _origSort != 0,
+                      () => setM(() => _origSort = _origSort == 1 ? 2 : 1)), // กดซ้ำ = สลับ มาก-น้อย / น้อย-มาก
                 ]),
               ),
               // รายการ
               Flexible(
                 child: list.isEmpty
                     ? Padding(
-                        padding: const EdgeInsets.fromLTRB(20, 24, 20, 40),
+                        padding: const EdgeInsets.fromLTRB(14, 16, 14, 24),
                         child: Column(mainAxisSize: MainAxisSize.min, children: [
-                          Icon(tab == 0 ? Icons.usb_off : Icons.folder_off, color: Colors.white24, size: 40),
-                          const SizedBox(height: 12),
+                          Icon(tab == 0 ? Icons.usb_off : Icons.folder_off, color: Colors.white24, size: 32),
+                          const SizedBox(height: 8),
                           Text(
                             tab == 0
                                 ? (ecm == null ? 'กรุณาเชื่อมต่อ ECU แล้วกดสแกน ECU\nหรือแตะ "ไฟล์ทั้งหมด" เพื่อดูทุกชุด' : 'ยังไม่มีไฟล์ในแอปที่ตรงกับ ID กล่องนี้\n(${ecmHex(ecm)})')
                                 : (q.trim().isEmpty ? 'ยังไม่มีไฟล์ฝังในแอป' : 'ไม่พบไฟล์ที่ค้นหา'),
                             textAlign: TextAlign.center,
-                            style: const TextStyle(fontSize: 14, color: Colors.white54, height: 1.5),
+                            style: const TextStyle(fontSize: 13, color: Colors.white54, height: 1.5),
                           ),
                           if (tab == 0)
                             Padding(
-                              padding: const EdgeInsets.only(top: 14),
+                              padding: const EdgeInsets.only(top: 8),
                               child: TextButton(onPressed: () => setM(() => tab = 1), child: Text('ดูไฟล์ทั้งหมด ›', style: TextStyle(color: th.c2))),
                             ),
                         ]),
                       )
-                    : ListView(padding: const EdgeInsets.fromLTRB(20, 2, 20, 16), shrinkWrap: true, children: [for (final o in list) card(o)]),
+                    : ListView(padding: const EdgeInsets.fromLTRB(14, 0, 14, 10), shrinkWrap: true, children: [for (final o in list) card(o)]),
               ),
             ]),
           );
@@ -5601,15 +5773,29 @@ class _TunePageState extends State<TunePage> {
       },
     );
     if (p == null || !mounted) return;
-    if (_hasEdits && !await _confirm('เปิดไฟล์ ORIGINAL', 'ค่าที่แก้ใน BIN ปัจจุบันจะหายไป', ok: 'เปิด ${p.name}')) return;
+    if (mode == 2) {
+      if (_hasEdits && !await _confirm('เปิด XDF ใหม่', 'ประวัติย้อนกลับจะถูกล้าง (ค่าที่แก้ใน BIN ยังอยู่)', ok: 'เปิด ${p.xdfName}')) return;
+    } else if (_hasEdits && !await _confirm('เปิดไฟล์ ORIGINAL', 'ค่าที่แก้ใน BIN ปัจจุบันจะหายไป', ok: 'เปิด ${p.name}')) {
+      return;
+    }
     try {
-      final bin = (await rootBundle.load(p.bin)).buffer.asUint8List();
-      final xb = (await rootBundle.load(p.xdf)).buffer.asUint8List();
-      final d = XdfDef.parse(Uint8List.fromList(xb));
-      s.loadBin(p.binName, Uint8List.fromList(bin));
-      s.loadXdf(p.xdfName, d);
+      if (mode != 2) {
+        final bin = (await rootBundle.load(p.bin)).buffer.asUint8List();
+        s.loadBin(p.binName, Uint8List.fromList(bin), src: 1);
+      }
+      if (mode != 1) {
+        final xb = Uint8List.fromList((await rootBundle.load(p.xdf)).buffer.asUint8List());
+        s.loadXdf(p.xdfName, XdfDef.parse(xb), src: 1, raw: xb);
+      }
       setState(_resetView);
-      _snack('เปิด ${p.name} แล้ว — เลือกตารางจากเมนูตารางจูน');
+      final bad = s.invalidCount;
+      _snack(bad > 0
+          ? 'มี $bad รายการใน XDF ที่อยู่นอกขนาดไฟล์ BIN — ตรวจว่าเป็นไฟล์คู่กัน'
+          : switch (mode) {
+              1 => 'เปิด BIN ${p.binName} แล้ว — เลือกตารางจากเมนูตารางจูน',
+              2 => 'เปิด XDF ${p.xdfName} แล้ว — เลือกตารางจากเมนูตารางจูน',
+              _ => 'เปิด ${p.name} แล้ว — เลือกตารางจากเมนูตารางจูน',
+            });
     } on XdfError catch (e) {
       await _showXdfError(e.msg);
     } catch (e) {
@@ -5625,7 +5811,16 @@ class _TunePageState extends State<TunePage> {
     try {
       final b = await BinLib.i.read(e);
       s.loadBin('${e.name}.bin', b);
+      final xb = await BinLib.i.readXdf(e);
+      if (xb != null) {
+        try {
+          s.loadXdf(e.xdf, XdfDef.parse(xb), raw: xb);
+        } on XdfError catch (err) {
+          await _showXdfError(err.msg);
+        }
+      }
       setState(_resetView);
+      _snack(xb != null ? 'เปิด ${e.name} + ${e.xdf} แล้ว' : 'เปิด ${e.name} แล้ว (ไฟล์นี้ไม่มี XDF บันทึกไว้)');
     } catch (err) {
       _snack('อ่านไฟล์ไม่ได้: $err');
     }
@@ -5666,6 +5861,8 @@ class _TunePageState extends State<TunePage> {
     final th = Cfg.i.t;
     final names = s.changedNames();
     final locks = s.lockChanges();
+    await BinLib.i.load();
+    if (!mounted) return;
     final fname = s.newFileName();
     final stem = fname.toLowerCase().endsWith('.bin') ? fname.substring(0, fname.length - 4) : fname;
     final tc = TextEditingController(text: stem);
@@ -5718,6 +5915,8 @@ class _TunePageState extends State<TunePage> {
               if (!kb) ...[
               const SizedBox(height: 8),
               Text('ต้นฉบับ: ${s.binName} (ไม่ถูกเขียนทับ)', style: const TextStyle(fontSize: 12.5, color: Colors.white70)),
+              Text(s.xdfRaw != null ? 'XDF ที่ใช้: ${s.xdfName} (บันทึกไว้คู่กัน)' : 'XDF: ไม่มี (บันทึกแค่ BIN)',
+                  style: TextStyle(fontSize: 12.5, color: s.xdfRaw != null ? kGreen : Colors.white54)),
               Text(
                   names.isEmpty
                       ? 'ยังไม่มีการแก้ไข (ไฟล์จะเหมือนต้นฉบับ)'
@@ -5752,8 +5951,8 @@ class _TunePageState extends State<TunePage> {
         await BinLib.i.load();
         if (!mounted) return;
         if (BinLib.i.exists(name) && !await askYes(context, 'ชื่อซ้ำ', 'มีไฟล์ชื่อ "$name" ในคลังแล้ว เขียนทับหรือไม่?', ok: 'เขียนทับ')) return;
-        await BinLib.i.save(name, bytes);
-        _snack('บันทึกเข้าคลังแล้ว: $name — แฟลชได้ที่หน้า FLASH⚡');
+        await BinLib.i.save(name, bytes, xdfName: s.xdfName, xdfRaw: s.xdfRaw);
+        _snack('บันทึกเข้าคลังแล้ว: $name${s.xdfRaw != null ? ' + XDF' : ''} — แฟลชได้ที่หน้า FLASH⚡');
       } catch (e) {
         _snack('บันทึกไม่สำเร็จ: $e');
       }
@@ -5792,7 +5991,7 @@ class _TunePageState extends State<TunePage> {
     return (v, lo, hi);
   }
 
-  _Proj3 _proj3(XdfTable t, double lo, double hi) => _Proj3(_v3, t.rows, t.cols, lo, hi, yaw, pitch, zoom);
+  _Proj3 _proj3(XdfTable t, double lo, double hi) => _Proj3(_v3, t.rows, t.cols, lo, hi, yaw, pitch, zoom, pan3);
 
   /// จุดบนผิว 3D ที่ใกล้นิ้วที่สุด (ในรัศมี 26px, ถ้าซ้อนกันเลือกจุดที่อยู่หน้าสุด)
   (int, int)? _hit3(XdfTable t, Offset pos) {
@@ -5817,7 +6016,7 @@ class _TunePageState extends State<TunePage> {
 
   // ----- 3D (อ่านนิ้วเองทั้งหมด ไม่ผ่าน GestureDetector เพื่อให้จับ "แตะ 2 ครั้งแล้วลาก" ได้แน่นอน) -----
   // 1 นิ้ว: แตะจุด = เลือก | ลากจุด = แก้ค่าขึ้น/ลง | ลากที่ว่าง = หมุน | แตะ 2 ครั้งแล้วลาก = เลือกคลุม
-  // 2 นิ้ว: ซูม
+  // 2 นิ้ว: บีบ/กาง = ซูม, ลากพร้อมกัน = เลื่อนกราฟ (ปุ่ม PREVIEW / แถบสี อยู่ที่เดิม)
   final Map<int, Offset> _p3 = {};
   Offset _p3Start = Offset.zero, _p3Last = Offset.zero;
   int _p3DownMs = 0;
@@ -5832,6 +6031,8 @@ class _TunePageState extends State<TunePage> {
       final ps = _p3.values.toList();
       _pinch0 = (ps[0] - ps[1]).distance;
       _zoom0 = zoom;
+      _mid0 = (ps[0] + ps[1]) / 2;
+      _pan0 = pan3;
       _m3 = 4;
       return;
     }
@@ -5849,7 +6050,10 @@ class _TunePageState extends State<TunePage> {
     if (_m3 == 4) {
       if (_p3.length >= 2 && _pinch0 > 0) {
         final ps = _p3.values.toList();
-        setState(() => zoom = (_zoom0 * (ps[0] - ps[1]).distance / _pinch0).clamp(0.4, 4.0).toDouble());
+        setState(() {
+          zoom = (_zoom0 * (ps[0] - ps[1]).distance / _pinch0).clamp(0.4, 4.0).toDouble();
+          pan3 = _pan0 + ((ps[0] + ps[1]) / 2 - _mid0); // ลาก 2 นิ้ว = เลื่อนกราฟ ขึ้น-ลง / ซ้าย-ขวา
+        });
       }
       return;
     }
@@ -5944,7 +6148,7 @@ class _TunePageState extends State<TunePage> {
           final px = _proj3(t, lo, hi).sc * _Proj3.zh * math.cos(pitch);
           if (px <= 0) return;
           final dv = -_dragDy / px * span;
-          s.write(t, {for (final e in _dragBase.entries) e.key: e.value + dv}, 'ลากจุด 3D', merge: true);
+          _w(t, {for (final e in _dragBase.entries) e.key: e.value + dv}, 'ลากจุด 3D', merge: true);
         }
       case 3:
         {
@@ -6227,7 +6431,7 @@ class _TunePageState extends State<TunePage> {
                     decoration: InputDecoration(
                       isDense: true,
                       contentPadding: const EdgeInsets.symmetric(horizontal: 6, vertical: 9),
-                      hintText: t == null ? 'ใส่ค่าที่ต้องการ' : 'ใส่ค่า (STEP ${_numStr(_step(t))})',
+                      hintText: 'ใส่ค่าที่ต้องการ',
                       hintStyle: const TextStyle(fontSize: 11.5, color: Colors.white38),
                       enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Colors.white38)),
                       focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide(color: th.c2, width: 1.5)),
@@ -6300,7 +6504,10 @@ class _TunePageState extends State<TunePage> {
           }
         },
         itemBuilder: (_) => [
-          PopupMenuItem(value: 1, child: _menuRow(Icons.folder_special, 'เลือก BIN/XDF จากแอป', 'ไฟล์ ORIGINAL: ${kOriginals.map((o) => o.name).join(', ')}', kGreen)),
+          PopupMenuItem(
+              value: 1,
+              child: _menuRow(Icons.folder_special, _pickLabel,
+                  'ไฟล์ ORIGINAL: ${kOriginals.map((o) => o.name).join(', ')}${_pickMode == 0 ? '' : (_pickMode == 2 ? ' · BIN ปัจจุบันไม่ถูกเปลี่ยน' : ' · XDF ปัจจุบันไม่ถูกเปลี่ยน')}', kGreen)),
           PopupMenuItem(value: 2, child: _menuRow(Icons.folder_open, 'เปิด BIN', s.binName ?? 'เฉพาะไฟล์ .bin', th.c)),
           PopupMenuItem(value: 3, child: _menuRow(Icons.description, 'เปิด XDF', s.xdfName ?? 'เฉพาะไฟล์ .xdf', th.c)),
           PopupMenuItem(value: 4, child: _menuRow(Icons.folder_copy, 'เปิดไฟล์จากคลังไฟล์', 'ไฟล์ที่บันทึกไว้ในแอพ', th.c2)),
@@ -6398,8 +6605,12 @@ class _TunePageState extends State<TunePage> {
       return _emptyCard(
         th,
         'ยังไม่ได้เลือกไฟล์',
-        'เลือก BIN + XDF จากเมนูไฟล์ เพื่อเริ่มแก้ไข',
-        'เลือก BIN/XDF จากแอป',
+        switch (_pickMode) {
+          1 => 'เปิด XDF จากภายนอกแล้ว — เลือก BIN ที่อยู่ในแอปมาใช้คู่กัน',
+          2 => 'เปิด BIN จากภายนอกแล้ว — เลือก XDF ที่อยู่ในแอปมาใช้คู่กัน',
+          _ => 'เลือก BIN + XDF จากเมนูไฟล์ เพื่อเริ่มแก้ไข',
+        },
+        _pickLabel,
         _openOriginals,
         extra: [
           const SizedBox(height: 10),
@@ -6464,7 +6675,7 @@ class _TunePageState extends State<TunePage> {
                         return CustomPaint(
                           size: Size.infinite,
                           painter: _SurfacePainter(
-                            v: v, lo: lo, hi: hi, yaw: yaw, pitch: pitch, zoom: zoom, lr: lp.$1, lc: lp.$2, th: th,
+                            v: v, lo: lo, hi: hi, yaw: yaw, pitch: pitch, zoom: zoom, pan: pan3, lr: lp.$1, lc: lp.$2, th: th,
                             rowL: rowL, colL: colL, t: t,
                             xName: _axisName(t, true), yName: _axisName(t, false), zName: t.title,
                             spin: _spin != null,
@@ -6908,17 +7119,47 @@ class _ThumbPainter extends CustomPainter {
   bool shouldRepaint(_ThumbPainter o) => true;
 }
 
+// ---------- ป๊อปอัพเตือนเล็กกลางจอ: ค่อย ๆ โผล่แล้วจางหาย ----------
+class _FadeToast extends StatelessWidget {
+  final String msg;
+  final Color col;
+  const _FadeToast({required this.msg, required this.col});
+  @override
+  Widget build(BuildContext context) => TweenAnimationBuilder<double>(
+        tween: Tween(begin: 0, end: 1),
+        duration: const Duration(milliseconds: 1500),
+        builder: (_, t, child) => Opacity(opacity: t < 0.1 ? t / 0.1 : (t > 0.65 ? ((1 - t) / 0.35).clamp(0.0, 1.0).toDouble() : 1.0), child: child),
+        child: Material(
+          color: Colors.transparent,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+            decoration: BoxDecoration(
+              color: const Color(0xEE202028),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: col),
+              boxShadow: const [BoxShadow(color: Colors.black54, blurRadius: 10)],
+            ),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              Icon(Icons.warning_amber_rounded, size: 14, color: col),
+              const SizedBox(width: 6),
+              Text(msg, style: const TextStyle(fontSize: 11.5, color: Colors.white)),
+            ]),
+          ),
+        ),
+      );
+}
+
 // ---------- การฉายภาพ 3D (ใช้ร่วมกันระหว่างวาด และหาจุดที่นิ้วแตะ) ----------
 class _Proj3 {
   static const zh = 1.5; // ความสูงแกน Z เทียบความกว้างฐาน
   static const camD = 6.0; // ระยะกล้อง: มีระยะลึก ใกล้ใหญ่กว่า
   final int nr, nc;
   final double lo, span, sc, ox, oy, cyw, syw, cp, sp;
-  _Proj3(Size size, this.nr, this.nc, this.lo, double hi, double yaw, double pitch, double zoom)
+  _Proj3(Size size, this.nr, this.nc, this.lo, double hi, double yaw, double pitch, double zoom, [Offset pan = Offset.zero])
       : span = hi > lo ? hi - lo : 1.0,
         sc = math.min(size.width * 0.36, size.height * 0.72) * zoom,
-        ox = size.width * 0.50,
-        oy = size.height * 0.56,
+        ox = size.width * 0.50 + pan.dx,
+        oy = size.height * 0.56 + pan.dy,
         cyw = math.cos(yaw),
         syw = math.sin(yaw),
         cp = math.cos(pitch),
@@ -6947,8 +7188,10 @@ class _SurfacePainter extends CustomPainter {
   final bool spin; // PREVIEW กำลังหมุน: ซ่อนเส้นแกน Z และตัวเลขแกน x y z
   final (int, int, int, int)? sel; // ช่องที่เลือก (r0,c0,r1,c1)
   final Rect? box; // กรอบลากคลุม
+  final Offset pan; // เลื่อนกราฟด้วย 2 นิ้ว
   _SurfacePainter({
     this.spin = false,
+    this.pan = Offset.zero,
     this.sel,
     this.box,
     required this.v, required this.lo, required this.hi, required this.yaw, required this.pitch, required this.zoom,
@@ -6962,7 +7205,7 @@ class _SurfacePainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     final nr = v.length, nc = v[0].length;
     if (nr < 2 || nc < 2) return;
-    final P = _Proj3(size, nr, nc, lo, hi, yaw, pitch, zoom);
+    final P = _Proj3(size, nr, nc, lo, hi, yaw, pitch, zoom, pan);
     final span = P.span;
     (Offset, double) pt(double r, double c, double val) => P.pt(r, c, val);
 
@@ -7198,7 +7441,8 @@ class BinEntry {
   DateTime time;
   String offset, cks; // ค่าที่ใช้แฟลชครั้งล่าสุด (จำไว้ให้ ไม่ได้ใส่อัตโนมัติจากที่อื่น)
   bool fix;
-  BinEntry(this.name, this.size, this.sum16, this.ck8, this.time, {this.offset = '', this.cks = '', this.fix = false});
+  String xdf; // ชื่อ XDF ที่บันทึกไว้คู่กัน (ว่าง = ไม่มี)
+  BinEntry(this.name, this.size, this.sum16, this.ck8, this.time, {this.offset = '', this.cks = '', this.fix = false, this.xdf = ''});
 
   static BinEntry make(String name, Uint8List b, {BinEntry? keep}) {
     int s = 0;
@@ -7206,17 +7450,17 @@ class BinEntry {
       s += x;
     }
     return BinEntry(name, b.length, s & 0xFFFF, s & 0xFF, DateTime.now(),
-        offset: keep?.offset ?? '', cks: keep?.cks ?? '', fix: keep?.fix ?? false);
+        offset: keep?.offset ?? '', cks: keep?.cks ?? '', fix: keep?.fix ?? false, xdf: keep?.xdf ?? '');
   }
 
   Map<String, dynamic> toJson() =>
-      {'n': name, 's': size, 'sum': sum16, 'ck': ck8, 't': time.millisecondsSinceEpoch, 'o': offset, 'c': cks, 'f': fix};
+      {'n': name, 's': size, 'sum': sum16, 'ck': ck8, 't': time.millisecondsSinceEpoch, 'o': offset, 'c': cks, 'f': fix, 'x': xdf};
 
   static BinEntry? fromJson(dynamic j) {
     try {
       return BinEntry(j['n'] as String, (j['s'] as num).toInt(), (j['sum'] as num).toInt(), (j['ck'] as num).toInt(),
           DateTime.fromMillisecondsSinceEpoch((j['t'] as num).toInt()),
-          offset: (j['o'] as String?) ?? '', cks: (j['c'] as String?) ?? '', fix: (j['f'] as bool?) ?? false);
+          offset: (j['o'] as String?) ?? '', cks: (j['c'] as String?) ?? '', fix: (j['f'] as bool?) ?? false, xdf: (j['x'] as String?) ?? '');
     } catch (_) {
       return null;
     }
@@ -7240,6 +7484,7 @@ class BinLib extends ChangeNotifier {
   }
 
   io.File _f(io.Directory d, String name) => io.File('${d.path}/$name.bin');
+  io.File _fx(io.Directory d, String name) => io.File('${d.path}/$name.xdf'); // XDF ที่บันทึกคู่กับ BIN
 
   static String clean(String s) => s.replaceAll(RegExp(r'[\\/:*?"<>|\x00-\x1F]'), '_').trim();
 
@@ -7278,17 +7523,19 @@ class BinLib extends ChangeNotifier {
 
   bool exists(String name) => items.any((e) => e.name == name);
 
-  Future<BinEntry> save(String name, Uint8List bytes) async {
+  Future<BinEntry> save(String name, Uint8List bytes, {String? xdfName, Uint8List? xdfRaw}) async {
     await load();
     name = clean(name);
     final d = await _d();
     await _f(d, name).writeAsBytes(bytes, flush: true);
+    if (xdfRaw != null) await _fx(d, name).writeAsBytes(xdfRaw, flush: true);
     BinEntry? old;
     for (final e in items) {
       if (e.name == name) old = e;
     }
     items.removeWhere((e) => e.name == name);
     final e = BinEntry.make(name, bytes, keep: old);
+    if (xdfRaw != null) e.xdf = xdfName ?? '$name.xdf';
     items.insert(0, e);
     await _saveIdx();
     notifyListeners();
@@ -7297,10 +7544,21 @@ class BinLib extends ChangeNotifier {
 
   Future<Uint8List> read(BinEntry e) async => _f(await _d(), e.name).readAsBytes();
 
+  /// XDF ที่บันทึกคู่กับไฟล์นี้ (null = ไม่มี เช่นไฟล์ที่บันทึกก่อนเวอร์ชันนี้)
+  Future<Uint8List?> readXdf(BinEntry e) async {
+    if (e.xdf.isEmpty) return null;
+    final f = _fx(await _d(), e.name);
+    return await f.exists() ? f.readAsBytes() : null;
+  }
+
   Future<void> remove(BinEntry e) async {
     final d = await _d();
     try {
       await _f(d, e.name).delete();
+    } catch (_) {}
+    try {
+      final x = _fx(d, e.name);
+      if (await x.exists()) await x.delete();
     } catch (_) {}
     items.remove(e);
     await _saveIdx();
@@ -7314,6 +7572,10 @@ class BinLib extends ChangeNotifier {
     if (exists(to)) return 'มีชื่อ "$to" อยู่แล้ว';
     final d = await _d();
     await _f(d, e.name).rename(_f(d, to).path);
+    try {
+      final x = _fx(d, e.name);
+      if (await x.exists()) await x.rename(_fx(d, to).path);
+    } catch (_) {}
     e.name = to;
     await _saveIdx();
     notifyListeners();
@@ -7550,7 +7812,12 @@ Future<BinEntry?> pickFromLibrary(BuildContext context) async {
                     dense: true,
                     leading: Icon(Icons.memory, color: th.c),
                     title: Text(e.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-                    subtitle: Text('${(e.size / 1024).toStringAsFixed(1)} KB · ${_dateStr(e.time)}', style: const TextStyle(fontSize: 11)),
+                    subtitle: Text.rich(TextSpan(style: const TextStyle(fontSize: 11), children: [
+                      TextSpan(text: '${(e.size / 1024).toStringAsFixed(1)} KB · ${_dateStr(e.time)} · '),
+                      TextSpan(
+                          text: e.xdf.isNotEmpty ? 'XDF: ${e.xdf}' : 'ไม่มี XDF',
+                          style: TextStyle(color: e.xdf.isNotEmpty ? kGreen : kAmber)),
+                    ])),
                     onTap: () => Navigator.of(dctx).pop(e),
                   ),
               ]),
