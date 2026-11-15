@@ -49,7 +49,7 @@ const kThemes = <AppTheme>[
 
 // เวอร์ชันเฟิร์มแวร์ที่แอพรุ่นนี้ออกแบบมาให้ใช้คู่กัน (แสดงเทียบในหน้า SETTING)
 const kAppFw = '1.0.14';
-const kAppVer = '1.2.1'; // เวอร์ชันแอพ (ตรงกับ pubspec.yaml)
+const kAppVer = '1.2.3'; // เวอร์ชันแอพ (ตรงกับ pubspec.yaml)
 
 // ---------- ค่าคีย์ที่แสดงได้ (เหมือน TEST1 + TOP SPD) ----------
 const int kTps = 0, kTemp = 1, kBatt = 2, kAfr = 3, kInj = 4, kIgn = 5, kRpm = 6, kMap = 7,
@@ -3599,6 +3599,7 @@ class TuneSession extends ChangeNotifier {
   TuneSession._();
 
   Uint8List? orig, bin;
+  Uint8List? saved; // ค่าตอนบันทึกเข้าคลังล่าสุด (จุดแดงหลังชื่อตาราง = ยังไม่ได้บันทึก)
   Uint8List? commit; // ค่าที่กด ✅ บันทึกแล้ว (❌ = กลับไปค่านี้)
   String? binName, xdfName;
   XdfDef? xdf;
@@ -3626,6 +3627,7 @@ class TuneSession extends ChangeNotifier {
 
   void loadBin(String name, Uint8List b, {int src = 2}) {
     binSrc = src;
+    saved = Uint8List.fromList(b);
     orig = Uint8List.fromList(b);
     bin = Uint8List.fromList(b);
     commit = Uint8List.fromList(b);
@@ -3672,6 +3674,7 @@ class TuneSession extends ChangeNotifier {
 
   void clearBin() {
     binSrc = 0;
+    saved = null;
     orig = null;
     bin = null;
     commit = null;
@@ -3788,6 +3791,42 @@ class TuneSession extends ChangeNotifier {
   }
 
   bool cellChanged(XdfTable t, int r, int c) => _rangeChanged(t.z.addrOf(r, c), t.z.bytes);
+
+  /// ตารางนี้มีค่าที่ยังไม่ได้บันทึกเข้าคลัง (เทียบกับตอนบันทึกล่าสุด / ตอนเปิดไฟล์)
+  bool tableUnsaved(XdfTable t) {
+    final b = bin, o = saved ?? orig;
+    if (b == null || o == null) return false;
+    final z = t.z;
+    for (int r = 0; r < t.rows; r++) {
+      for (int c = 0; c < t.cols; c++) {
+        final a = z.addrOf(r, c);
+        for (int k = 0; k < z.bytes; k++) {
+          final p = a + k;
+          if (p >= 0 && p < b.length && p < o.length && b[p] != o[p]) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /// จำนวนไบต์ที่แก้แล้วยังไม่ได้บันทึกเข้าคลัง
+  int get unsavedBytes {
+    final b = bin, o = saved ?? orig;
+    if (b == null || o == null) return 0;
+    int n = 0;
+    for (int k = 0; k < b.length && k < o.length; k++) {
+      if (b[k] != o[k]) n++;
+    }
+    return n;
+  }
+
+  /// บันทึกเข้าคลังแล้ว: ล้างจุดแดงสถานะการเปลี่ยนแปลง
+  void markSaved() {
+    final b = bin;
+    if (b == null) return;
+    saved = Uint8List.fromList(b);
+    _changed();
+  }
 
   bool tableChanged(XdfTable t) {
     for (int r = 0; r < t.rows; r++) {
@@ -5466,7 +5505,7 @@ class _TunePageState extends State<TunePage> {
   // ----- ไฟล์ -----
   Future<bool> _confirm(String title, String msg, {String ok = 'ตกลง'}) => askYes(context, title, msg, ok: ok);
 
-  bool get _hasEdits => s.changedBytes > 0;
+  bool get _hasEdits => s.unsavedBytes > 0; // บันทึกเข้าคลังแล้ว = ไม่ต้องถามก่อนเปิดไฟล์อื่น
 
   void _resetView() {
     a0 = null;
@@ -5952,6 +5991,7 @@ class _TunePageState extends State<TunePage> {
         if (!mounted) return;
         if (BinLib.i.exists(name) && !await askYes(context, 'ชื่อซ้ำ', 'มีไฟล์ชื่อ "$name" ในคลังแล้ว เขียนทับหรือไม่?', ok: 'เขียนทับ')) return;
         await BinLib.i.save(name, bytes, xdfName: s.xdfName, xdfRaw: s.xdfRaw);
+        s.markSaved();
         _snack('บันทึกเข้าคลังแล้ว: $name${s.xdfRaw != null ? ' + XDF' : ''} — แฟลชได้ที่หน้า FLASH⚡');
       } catch (e) {
         _snack('บันทึกไม่สำเร็จ: $e');
@@ -6016,7 +6056,7 @@ class _TunePageState extends State<TunePage> {
 
   // ----- 3D (อ่านนิ้วเองทั้งหมด ไม่ผ่าน GestureDetector เพื่อให้จับ "แตะ 2 ครั้งแล้วลาก" ได้แน่นอน) -----
   // 1 นิ้ว: แตะจุด = เลือก | ลากจุด = แก้ค่าขึ้น/ลง | ลากที่ว่าง = หมุน | แตะ 2 ครั้งแล้วลาก = เลือกคลุม
-  // 2 นิ้ว: บีบ/กาง = ซูม, ลากพร้อมกัน = เลื่อนกราฟ (ปุ่ม PREVIEW / แถบสี อยู่ที่เดิม)
+  // 2 นิ้ว: บีบ/กาง = ซูม, ลากพร้อมกัน = เลื่อนกราฟขึ้น-ลง ไม่เกิน ±50% (ปุ่ม PREVIEW / แถบสี อยู่ที่เดิม)
   final Map<int, Offset> _p3 = {};
   Offset _p3Start = Offset.zero, _p3Last = Offset.zero;
   int _p3DownMs = 0;
@@ -6052,7 +6092,8 @@ class _TunePageState extends State<TunePage> {
         final ps = _p3.values.toList();
         setState(() {
           zoom = (_zoom0 * (ps[0] - ps[1]).distance / _pinch0).clamp(0.4, 4.0).toDouble();
-          pan3 = _pan0 + ((ps[0] + ps[1]) / 2 - _mid0); // ลาก 2 นิ้ว = เลื่อนกราฟ ขึ้น-ลง / ซ้าย-ขวา
+          final lim = _v3.height * 0.5; // เลื่อนขึ้น/ลงได้ไม่เกิน 50% ของความสูงกรอบ
+          pan3 = Offset(0, (_pan0.dy + ((ps[0] + ps[1]) / 2 - _mid0).dy).clamp(-lim, lim).toDouble()); // ลาก 2 นิ้ว = เลื่อนกราฟขึ้น-ลงเท่านั้น
         });
       }
       return;
@@ -6841,7 +6882,7 @@ class _TunePageState extends State<TunePage> {
                           ),
                           if (t.valid && s.tableDirty(t))
                             const Padding(padding: EdgeInsets.only(left: 4), child: Icon(Icons.circle, size: 8, color: kAmber))
-                          else if (t.valid && s.tableChanged(t))
+                          else if (t.valid && s.tableUnsaved(t))
                             Container(width: 8, height: 8, decoration: BoxDecoration(color: th.c, shape: BoxShape.circle)),
                         ]),
                       ),
