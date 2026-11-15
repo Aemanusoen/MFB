@@ -48,7 +48,8 @@ const kThemes = <AppTheme>[
 ];
 
 // เวอร์ชันเฟิร์มแวร์ที่แอพรุ่นนี้ออกแบบมาให้ใช้คู่กัน (แสดงเทียบในหน้า SETTING)
-const kAppFw = '1.0.13';
+const kAppFw = '1.0.14';
+const kAppVer = '1.2.0'; // เวอร์ชันแอพ (ตรงกับ pubspec.yaml)
 
 // ---------- ค่าคีย์ที่แสดงได้ (เหมือน TEST1 + TOP SPD) ----------
 const int kTps = 0, kTemp = 1, kBatt = 2, kAfr = 3, kInj = 4, kIgn = 5, kRpm = 6, kMap = 7,
@@ -57,14 +58,16 @@ const int kTps = 0, kTemp = 1, kBatt = 2, kAfr = 3, kInj = 4, kIgn = 5, kRpm = 6
 class KeyDef {
   final String name, unit;
   final int dec;
-  const KeyDef(this.name, this.unit, this.dec);
+  final String th; // ชื่อภาษาไทยต่อท้ายชื่อในช่องค่า
+  const KeyDef(this.name, this.unit, this.dec, [this.th = '']);
 }
 
 const kKeys = <KeyDef>[
-  KeyDef('TPS', '%', 1), KeyDef('W.TEMP', '°C', 0), KeyDef('BATT', 'V', 1), KeyDef('AFR', '', 1),
-  KeyDef('INJ', 'ms', 2), KeyDef('IGN', '°BTDC', 1), KeyDef('RPM', 'rpm', 0), KeyDef('MAP', 'kPa', 0),
-  KeyDef('SPD', 'km/h', 0), KeyDef('EOT', '°C', 0), KeyDef('IAT', '°C', 0), KeyDef('O2', 'V', 2),
-  KeyDef('STFT', '', 3), KeyDef('LTFT', '', 3), KeyDef('TOP SPD', 'km/h', 0),
+  KeyDef('TPS', '%', 1, 'ลิ้นเร่ง'), KeyDef('W.TEMP', '°C', 0, 'อุณหภูมิน้ำ'), KeyDef('BATT', 'V', 1, 'แบตเตอรี่'),
+  KeyDef('AFR', '', 1, 'อากาศ : น้ำมัน'), KeyDef('INJ', 'ms', 2, 'เวลาฉีด'), KeyDef('IGN', '°BTDC', 1, 'องศาจุดระเบิด'),
+  KeyDef('RPM', 'rpm', 0, 'รอบเครื่อง'), KeyDef('MAP', 'kPa', 0, 'แรงดันไอดี'), KeyDef('SPD', 'km/h', 0, 'ความเร็ว'),
+  KeyDef('EOT', '°C', 0, 'อุณหภูมิน้ำมันเครื่อง'), KeyDef('IAT', '°C', 0, 'อุณหภูมิอากาศ'), KeyDef('O2', 'V', 2, 'เซนเซอร์ O2'),
+  KeyDef('STFT', '', 3, 'ชดเชยน้ำมันระยะสั้น'), KeyDef('LTFT', '', 3, 'ชดเชยน้ำมันระยะยาว'), KeyDef('TOP SPD', 'km/h', 0, 'ความเร็วสูงสุด'),
 ];
 
 // สีค่าคงที่ (ไม่เปลี่ยนตามธีม)
@@ -84,6 +87,37 @@ Color rpmColor(double rpm, int shift) {
   return t < 0.65 ? Color.lerp(g, y, t / 0.65)! : Color.lerp(y, r, (t - 0.65) / 0.35)!;
 }
 
+// ---------- คำอธิบาย DTC Honda (ตรงกับ DTC_TABLE ในเฟิร์มแวร์เกจ) : (อังกฤษ, ไทย) ----------
+const Map<int, (String, String)> kDtcDesc = {
+  101: ('MAP sensor low voltage', 'เซนเซอร์ MAP แรงดันต่ำ'),
+  102: ('MAP sensor high voltage', 'เซนเซอร์ MAP แรงดันสูง'),
+  201: ('MAP sensor performance', 'เซนเซอร์ MAP ทำงานผิดปกติ'),
+  601: ('Baro sensor low voltage', 'เซนเซอร์ความดันบรรยากาศ แรงดันต่ำ'),
+  602: ('Baro sensor high voltage', 'เซนเซอร์ความดันบรรยากาศ แรงดันสูง'),
+  701: ('ECT sensor low voltage', 'เซนเซอร์อุณหภูมิน้ำ (ECT) แรงดันต่ำ'),
+  702: ('ECT sensor high voltage', 'เซนเซอร์อุณหภูมิน้ำ (ECT) แรงดันสูง'),
+  801: ('TP sensor low voltage', 'เซนเซอร์ลิ้นเร่ง (TP) แรงดันต่ำ'),
+  802: ('TP sensor high voltage', 'เซนเซอร์ลิ้นเร่ง (TP) แรงดันสูง'),
+  901: ('IAT sensor low voltage', 'เซนเซอร์อุณหภูมิอากาศ (IAT) แรงดันต่ำ'),
+  902: ('IAT sensor high voltage', 'เซนเซอร์อุณหภูมิอากาศ (IAT) แรงดันสูง'),
+  1101: ('VS sensor no signal', 'เซนเซอร์ความเร็ว (VS) ไม่มีสัญญาณ'),
+  1201: ('No.1 primary injector', 'หัวฉีดหลัก สูบ 1'),
+  1301: ('No.2 primary injector', 'หัวฉีดหลัก สูบ 2'),
+  1401: ('No.3 primary injector', 'หัวฉีดหลัก สูบ 3'),
+  1501: ('No.4 primary injector', 'หัวฉีดหลัก สูบ 4'),
+  1601: ('No.1 secondary injector', 'หัวฉีดรอง สูบ 1'),
+  1701: ('No.2 secondary injector', 'หัวฉีดรอง สูบ 2'),
+  1801: ('CMP sensor no signal', 'เซนเซอร์เพลาลูกเบี้ยว (CMP) ไม่มีสัญญาณ'),
+  1901: ('CKP sensor no signal', 'เซนเซอร์เพลาข้อเหวี่ยง (CKP) ไม่มีสัญญาณ'),
+  2101: ('O2 sensor 1 low voltage', 'เซนเซอร์ O2 ตัวที่ 1 แรงดันต่ำ'),
+  2102: ('O2 sensor 1 high voltage', 'เซนเซอร์ O2 ตัวที่ 1 แรงดันสูง'),
+  2201: ('O2 sensor 2 low voltage', 'เซนเซอร์ O2 ตัวที่ 2 แรงดันต่ำ'),
+  2202: ('O2 sensor 2 high voltage', 'เซนเซอร์ O2 ตัวที่ 2 แรงดันสูง'),
+};
+(String, String)? dtcDesc(int code, int sub) => kDtcDesc[code * 100 + sub];
+
+const kBikeNames = ['WAVE', 'LEAD', 'PCX160', 'GIORNO']; // ตรงกับ BM_* ในเฟิร์มแวร์เกจ
+
 // ---------- การตั้งค่าที่บันทึกในเครื่อง ----------
 class Cfg extends ChangeNotifier {
   static final Cfg i = Cfg._();
@@ -93,7 +127,7 @@ class Cfg extends ChangeNotifier {
   int tempWarn = 105; // °C
   bool speedGps = true; // true = GPS, false = ECU
   int graphOn = 15; // หน้า GRAPH: บิตเปิด-ปิดเส้นกราฟ RPM/TPS/GPS/AFR
-  List<int> main = [kTps, kAfr, kIgn, kTemp, kEot, kBatt, kIat]; // ซ้าย 3 + ขวา 4
+  List<int> main = [kTps, kAfr, kIgn, kTemp, kEot, kBatt]; // ซ้าย 3 + ขวา 3
   List<int> grid = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
 
   AppTheme get t => kThemes[themeIdx];
@@ -114,7 +148,7 @@ class Cfg extends ChangeNotifier {
       tempWarn = (p.getInt('tempWarn') ?? 105).clamp(60, 150).toInt();
       speedGps = p.getBool('speedGps') ?? true;
       graphOn = (p.getInt('gon') ?? 15) & 15;
-      main = _parse(p.getString('main'), 7) ?? main;
+      main = _parse(p.getString('main'), 6) ?? _parse(p.getString('main'), 7)?.sublist(0, 6) ?? main; // แอพรุ่นเก่าเก็บ 7 ช่อง -> ใช้ 6 ช่องแรก
       grid = _parse(p.getString('grid'), 12) ?? grid;
     } catch (_) {}
   }
@@ -233,11 +267,22 @@ class Telemetry {
   final double? rpm, speed, ect, iat, eot, tps, map, batt, afr, ign, inj, o2v, stft, ltft;
   final FlashStat? fl; // null = เฟิร์มแวร์เกจไม่รองรับการแฟลช (ต่ำกว่า 1.0.9)
   final int? fwMaj, fwMin, fwPatch; // เวอร์ชันเฟิร์มแวร์เกจ (null = เฟิร์มแวร์เก่าที่ยังไม่ส่งเวอร์ชัน)
+  // DTC จากเกจ (FW 1.0.14, ไบต์ 75..111): dtcSup = เกจรองรับ, dtcValid = ผลอ่านใช้ได้, dtcClear 0 ว่าง 1 กำลังลบ 2 สำเร็จ 3 ไม่สำเร็จ
+  final bool dtcSup, dtcValid;
+  final int dtcClear;
+  final List<List<int>> dtcCur, dtcSto; // [code, sub]
+  // ECU INFO (FW 1.0.14, ไบต์ 112..127)
+  final bool infoSup, kwp;
+  final List<int>? ecuId;
+  final int tabA, tabB, tabS, linkSec, ageDs;
+  final double hz;
   Telemetry({
     this.fresh = false, this.state = 0, this.proto = 0, this.bike = 0, this.img = 0,
     this.rpm, this.speed, this.ect, this.iat, this.eot, this.tps, this.map,
     this.batt, this.afr, this.ign, this.inj, this.o2v, this.stft, this.ltft, this.fl,
     this.fwMaj, this.fwMin, this.fwPatch,
+    this.dtcSup = false, this.dtcValid = false, this.dtcClear = 0, this.dtcCur = const [], this.dtcSto = const [],
+    this.infoSup = false, this.kwp = false, this.ecuId, this.tabA = 0, this.tabB = 0, this.tabS = 0, this.linkSec = 0, this.ageDs = 255, this.hz = 0,
   });
   String? get fwText => fwMaj == null ? null : '$fwMaj.$fwMin.$fwPatch';
 
@@ -249,6 +294,10 @@ class Telemetry {
       return v == 0x7FFF ? null : v / k;
     }
 
+    final hasDtc = b.length >= 112 && b[75] >= 1;
+    final hasInfo = b.length >= 128 && b[112] >= 1;
+    final nc = hasDtc ? math.min(16, b[78]) : 0;
+    final ns = hasDtc ? math.min(16 - nc, b[79]) : 0;
     return Telemetry(
       state: b[1], proto: b[2], fresh: (b[3] & 1) != 0, bike: b[4], img: b[5],
       rpm: f(6, 1), speed: f(8, 10), ect: f(10, 10), iat: f(12, 10),
@@ -259,11 +308,77 @@ class Telemetry {
       fwMaj: b.length >= 75 ? b[72] : null,
       fwMin: b.length >= 75 ? b[73] : null,
       fwPatch: b.length >= 75 ? b[74] : null,
+      dtcSup: hasDtc, dtcValid: hasDtc && (b[76] & 1) != 0, dtcClear: hasDtc ? b[77] : 0,
+      dtcCur: [for (int i = 0; i < nc; i++) [b[80 + i * 2], b[81 + i * 2]]],
+      dtcSto: [for (int i = 0; i < ns; i++) [b[80 + (nc + i) * 2], b[81 + (nc + i) * 2]]],
+      infoSup: hasInfo, kwp: hasInfo && b[127] == 1,
+      ecuId: hasInfo && b[113] != 0 ? b.sublist(114, 119) : null,
+      tabA: hasInfo ? b[119] : 0, tabB: hasInfo ? b[120] : 0, tabS: hasInfo ? b[121] : 0,
+      hz: hasInfo ? d.getUint16(122, Endian.little) / 10 : 0,
+      linkSec: hasInfo ? d.getUint16(124, Endian.little) : 0, ageDs: hasInfo ? b[126] : 255,
     );
   }
 }
 
 enum LinkState { idle, scanning, connecting, connected }
+
+// ---------- ป้ายสถานะบนหัวจอ (หน้าแรก / GAUGE / SETTING): เกจ BLE / ECU / GPS + จำนวนดาวเทียม ----------
+Widget statusChip(String s, Color col, {String? extra, String? extra2}) => Container(
+      margin: const EdgeInsets.only(right: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(color: Colors.black54, border: Border.all(color: Colors.white24), borderRadius: BorderRadius.circular(6)),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Container(width: 7, height: 7, decoration: BoxDecoration(color: col, shape: BoxShape.circle, boxShadow: [BoxShadow(color: col, blurRadius: 5)])),
+        const SizedBox(width: 6),
+        Text(s, style: const TextStyle(fontFamily: kFont, fontSize: 8.5)),
+        if (extra != null) Text('  $extra', style: const TextStyle(fontFamily: kFont, fontSize: 8.5, color: kGreen)),
+        if (extra2 != null) Text(extra2, style: const TextStyle(fontFamily: kFont, fontSize: 8.5, color: Colors.white54)),
+      ]),
+    );
+
+Widget statusChips(GaugeController c) {
+  final linkTxt = switch (c.link) {
+    LinkState.idle => 'OFFLINE',
+    LinkState.scanning => 'SCANNING',
+    LinkState.connecting => 'CONNECTING',
+    LinkState.connected => c.gaugeName ?? 'CONNECTED',
+  };
+  final linkCol = c.link == LinkState.connected ? kGreen : (c.link == LinkState.idle ? kBad : kAmber);
+  final live = c.ecuLive || c.demo;
+  return SingleChildScrollView(
+    scrollDirection: Axis.horizontal,
+    child: Row(children: [
+      statusChip(linkTxt, linkCol),
+      statusChip(live ? 'ECU LIVE' : 'NO ECU', live ? kGreen : kBad),
+      c.gpsOk
+          ? statusChip('GPS', kGreen, extra: '${c.satUsed ?? '-'}', extra2: ' /${c.satTotal ?? '-'} SAT')
+          : statusChip('NO GPS', kBad),
+    ]),
+  );
+}
+
+Widget mfbLogo(AppTheme th, {double size = 17}) => Text.rich(
+      TextSpan(children: [
+        const TextSpan(text: 'MFB-', style: TextStyle(color: kLogoRed, shadows: [Shadow(color: kLogoRed, blurRadius: 10)])),
+        TextSpan(text: 'PRO', style: TextStyle(color: th.c, shadows: [Shadow(color: th.c, blurRadius: 10)])),
+      ]),
+      style: TextStyle(fontFamily: kFont, fontSize: size),
+    );
+
+Widget glowIconBtn(IconData ic, AppTheme th, VoidCallback f) => InkWell(
+      onTap: f,
+      borderRadius: BorderRadius.circular(6),
+      child: Container(
+        padding: const EdgeInsets.all(5),
+        decoration: BoxDecoration(
+          color: Colors.black45,
+          border: Border.all(color: th.c, width: 1.4),
+          borderRadius: BorderRadius.circular(6),
+          boxShadow: [BoxShadow(color: th.c.withOpacity(0.35), blurRadius: 8)],
+        ),
+        child: Icon(ic, size: 20, color: th.c),
+      ),
+    );
 
 // ---------- ตัวจัดการ BLE + GPS + Demo ----------
 class GaugeController extends ChangeNotifier {
@@ -751,6 +866,7 @@ class GaugeController extends ChangeNotifier {
         if (p != null) {
           t = p;
           _track();
+          _dtcTrack();
           notifyListeners();
         }
       });
@@ -764,6 +880,7 @@ class GaugeController extends ChangeNotifier {
         }
       });
       link = LinkState.connected;
+      if (_dtcWanted) dtcRead(); // เปิดหน้า DTC ค้างไว้ตอนต่อ -> สั่งอ่านทันที
       notifyListeners();
     } catch (e) {
       error = 'เชื่อมต่อไม่สำเร็จ';
@@ -795,6 +912,56 @@ class GaugeController extends ChangeNotifier {
     try {
       await _cmd?.write(bytes, withoutResponse: false);
     } catch (_) {}
+  }
+
+  // ---- DTC (หน้า DTC): อ่าน/ลบโค้ดผ่านเกจ (FW 1.0.14) ----
+  bool _dtcWanted = false;      // หน้า DTC เปิดอยู่ -> ให้เกจอ่าน DTC ต่อเนื่อง
+  bool dtcReading = false;      // กด "อ่านโค้ด" แล้ว รอผลรอบใหม่
+  bool _dtcSawInvalid = false;
+  int _dtcReqMs = 0;
+  DateTime? dtcLastRead;
+  void dtcWatch(bool on) {
+    if (_dtcWanted == on) return;
+    _dtcWanted = on;
+    if (on) {
+      dtcRead();
+    } else if (link == LinkState.connected) {
+      sendCmd([4, 0]);
+    }
+  }
+
+  void dtcRead() {
+    if (demo) {
+      dtcLastRead = DateTime.now();
+      notifyListeners();
+      return;
+    }
+    if (link != LinkState.connected) return;
+    dtcReading = true;
+    _dtcSawInvalid = false;
+    _dtcReqMs = DateTime.now().millisecondsSinceEpoch;
+    sendCmd([4, 2]);
+    notifyListeners();
+  }
+
+  void dtcClear() {
+    if (link != LinkState.connected) return;
+    sendCmd([1]);
+  }
+
+  void _dtcTrack() {
+    if (!t.dtcSup) return;
+    if (dtcReading) {
+      if (!t.dtcValid) {
+        _dtcSawInvalid = true;
+      } else if (_dtcSawInvalid) {
+        dtcReading = false;
+        dtcLastRead = DateTime.now();
+      }
+      if (DateTime.now().millisecondsSinceEpoch - _dtcReqMs > 9000) dtcReading = false;
+    } else if (dtcLastRead == null && t.dtcValid) {
+      dtcLastRead = DateTime.now();
+    }
   }
 
   /// ส่งโลโก้ 320x240 RGB565 (153600 ไบต์) ไปเก็บในบอร์ด คืนค่า null = สำเร็จ, ข้อความ = error
@@ -1088,7 +1255,7 @@ class _SplashPageState extends State<SplashPage> with SingleTickerProviderStateM
     if (!mounted) return;
     Navigator.of(context).pushReplacement(PageRouteBuilder(
       transitionDuration: const Duration(milliseconds: 500),
-      pageBuilder: (_, __, ___) => const GaugePage(),
+      pageBuilder: (_, __, ___) => const HomePage(),
       transitionsBuilder: (_, a, __, child) => FadeTransition(opacity: a, child: child),
     ));
   }
@@ -1182,17 +1349,15 @@ Future<void> pickKey(BuildContext context, List<int> arr, int idx) {
 }
 
 // ---------- หน้าเกจหลัก (2 หน้า: GAUGE / GRID) ----------
-class GaugePage extends StatefulWidget {
-  const GaugePage({super.key});
+// ---------- หน้าแรก: เลือกเมนู GAUGE / TUNE / FLASH (+ SETTING มุมขวาบน) ----------
+class HomePage extends StatefulWidget {
+  const HomePage({super.key});
   @override
-  State<GaugePage> createState() => _GaugePageState();
+  State<HomePage> createState() => _HomePageState();
 }
 
-class _GaugePageState extends State<GaugePage> {
-  final c = GaugeController();
-  final pc = PageController();
-  int page = 0;
-  Size _afrSz = Size.zero;
+class _HomePageState extends State<HomePage> {
+  final c = GaugeController(); // ตัวเดียวทั้งแอพ: BLE / GPS / DEMO ทำงานต่อเนื่องระหว่างเปลี่ยนหน้า
 
   void _rebuild() {
     if (mounted) setState(() {});
@@ -1205,7 +1370,7 @@ class _GaugePageState extends State<GaugePage> {
     c.addListener(_rebuild);
     Cfg.i.addListener(_rebuild);
     AfrLog.i.attach(c);
-    AfrLog.i.ensureDefault();   // หน้า AFR LOG ใช้แกนเริ่มต้น 29×25 ได้ทันที (จำลองด้วย DEMO)
+    AfrLog.i.ensureDefault(); // หน้า AFR LOG ใช้แกนเริ่มต้น 29×25 ได้ทันที (จำลองด้วย DEMO)
   }
 
   @override
@@ -1213,6 +1378,116 @@ class _GaugePageState extends State<GaugePage> {
     Cfg.i.removeListener(_rebuild);
     c.removeListener(_rebuild);
     c.dispose();
+    super.dispose();
+  }
+
+  void _open(Widget page) => Navigator.of(context).push(MaterialPageRoute(builder: (_) => page));
+
+  Widget _card(AppTheme th, IconData ic, String name, String desc, String sub, VoidCallback f) => Expanded(
+        child: GestureDetector(
+          onTap: f,
+          child: Container(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: th.c, width: 1.6),
+              gradient: const LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [Color(0xE60B1430), Color(0xE605060B)]),
+              boxShadow: [BoxShadow(color: th.c.withOpacity(0.4), blurRadius: 18)],
+            ),
+            child: Stack(children: [
+              Center(
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(ic, size: 64, color: th.c, shadows: [Shadow(color: th.c, blurRadius: 12)]),
+                  const SizedBox(height: 10),
+                  Text(name, style: TextStyle(fontFamily: kFont, fontSize: 22, color: Colors.white, shadows: [Shadow(color: th.c, blurRadius: 10)])),
+                  const SizedBox(height: 8),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    child: Text(desc, textAlign: TextAlign.center, style: const TextStyle(fontSize: 13, color: Colors.white70)),
+                  ),
+                ]),
+              ),
+              Positioned(
+                left: 0, right: 0, bottom: 10,
+                child: Text(sub, textAlign: TextAlign.center, style: const TextStyle(fontFamily: kFont, fontSize: 8, color: Colors.white38)),
+              ),
+            ]),
+          ),
+        ),
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    final th = Cfg.i.t;
+    final fw = c.t.fwText;
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Stack(fit: StackFit.expand, children: [
+        Image.asset('assets/bg.jpg', fit: BoxFit.cover),
+        Container(color: Colors.black.withOpacity(0.55)),
+        SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 6, 10, 6),
+            child: Column(children: [
+              Row(children: [
+                mfbLogo(th),
+                const SizedBox(width: 12),
+                Expanded(child: statusChips(c)),
+                glowIconBtn(Icons.settings, th, () => _open(SettingsPage(c: c))),
+              ]),
+              const SizedBox(height: 12),
+              Expanded(
+                child: Row(children: [
+                  _card(th, Icons.speed, 'GAUGE', 'เกจวัด · ดูค่าเครื่องยนต์ · DTC', 'LIVE DATA', () => _open(GaugePage(c: c))),
+                  const SizedBox(width: 14),
+                  _card(th, Icons.tune, 'TUNE', 'จูนตาราง XDF / BIN · คลังไฟล์', 'MAP EDITOR', () => _open(TunePage(c: c))),
+                  const SizedBox(width: 14),
+                  _card(th, Icons.bolt, 'FLASH', 'แฟลชกล่อง ECU ผ่านเกจ', 'KEIHIN · SHINDENGEN', () => _open(FlashPage(c: c))),
+                ]),
+              ),
+              const SizedBox(height: 6),
+              Row(children: [
+                const Text('APP $kAppVer', style: TextStyle(fontFamily: kFont, fontSize: 8, color: Colors.white38)),
+                const Spacer(),
+                Text(fw == null ? 'GAUGE FW --' : 'GAUGE FW $fw', style: const TextStyle(fontFamily: kFont, fontSize: 8, color: Colors.white38)),
+              ]),
+            ]),
+          ),
+        ),
+      ]),
+    );
+  }
+}
+
+class GaugePage extends StatefulWidget {
+  final GaugeController c;
+  const GaugePage({super.key, required this.c});
+  @override
+  State<GaugePage> createState() => _GaugePageState();
+}
+
+class _GaugePageState extends State<GaugePage> {
+  GaugeController get c => widget.c;
+  final pc = PageController();
+  int page = 0;
+  Size _afrSz = Size.zero;
+
+  void _rebuild() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    c.addListener(_rebuild);
+    Cfg.i.addListener(_rebuild);
+  }
+
+  @override
+  void dispose() {
+    Cfg.i.removeListener(_rebuild);
+    c.removeListener(_rebuild);
+    c.graphVisible = false;
+    c.dtcWatch(false); // ออกจากหน้า GAUGE: หยุดให้เกจอ่าน DTC
     pc.dispose();
     super.dispose();
   }
@@ -1224,14 +1499,6 @@ class _GaugePageState extends State<GaugePage> {
     final t = c.t;
     final blinkOn = (DateTime.now().millisecondsSinceEpoch ~/ 280) % 2 == 0;
     final shiftOn = t.rpm != null && t.rpm! >= cfg.shift;
-    final linkTxt = switch (c.link) {
-      LinkState.idle => 'OFFLINE',
-      LinkState.scanning => 'SCANNING',
-      LinkState.connecting => 'CONNECTING',
-      LinkState.connected => c.gaugeName ?? 'CONNECTED',
-    };
-    final linkCol = c.link == LinkState.connected ? kGreen : (c.link == LinkState.idle ? kBad : kAmber);
-
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(fit: StackFit.expand, children: [
@@ -1242,40 +1509,12 @@ class _GaugePageState extends State<GaugePage> {
             padding: const EdgeInsets.fromLTRB(10, 6, 10, 4),
             child: Column(children: [
               Row(children: [
-                Text.rich(
-                  TextSpan(children: [
-                    const TextSpan(text: 'MFB-', style: TextStyle(color: kLogoRed, shadows: [Shadow(color: kLogoRed, blurRadius: 10)])),
-                    TextSpan(text: 'PRO', style: TextStyle(color: th.c, shadows: [Shadow(color: th.c, blurRadius: 10)])),
-                  ]),
-                  style: const TextStyle(fontFamily: kFont, fontSize: 17),
-                ),
+                glowIconBtn(Icons.arrow_back, th, () => Navigator.of(context).pop()), // กลับหน้าแรก
+                const SizedBox(width: 10),
+                mfbLogo(th),
                 const SizedBox(width: 12),
-                Expanded(
-                  child: SingleChildScrollView(
-                    scrollDirection: Axis.horizontal,
-                    child: Row(children: [
-                      _chip(linkTxt, linkCol),
-                      _chip(c.ecuLive || c.demo ? 'ECU LIVE' : 'NO ECU', c.ecuLive || c.demo ? kGreen : kBad),
-                      _chip(c.gpsOk ? 'GPS' : 'NO GPS', c.gpsOk ? kGreen : kBad),
-                    ]),
-                  ),
-                ),
-                _btn(c.link == LinkState.connected ? 'ตัดการเชื่อมต่อ' : 'เชื่อมต่อ',
-                    () => c.link == LinkState.connected ? c.disconnect() : pickGauge(context, c), th),
-                const SizedBox(width: 6),
+                Expanded(child: statusChips(c)),
                 _btn('DEMO', c.toggleDemo, th, active: c.demo),
-                const SizedBox(width: 6),
-                _btn('FLASH⚡', () {
-                  Navigator.of(context).push(MaterialPageRoute(builder: (_) => FlashPage(c: c)));
-                }, th),
-                const SizedBox(width: 6),
-                _btn('TUNE💻', () {
-                  Navigator.of(context).push(MaterialPageRoute(builder: (_) => TunePage(c: c)));
-                }, th),
-                const SizedBox(width: 6),
-                _iconBtn(Icons.settings, th, () {
-                  Navigator.of(context).push(MaterialPageRoute(builder: (_) => SettingsPage(c: c)));
-                }),
               ]),
               const SizedBox(height: 6),
               Expanded(
@@ -1285,9 +1524,10 @@ class _GaugePageState extends State<GaugePage> {
                     controller: pc,
                     onPageChanged: (i) {
                       c.graphVisible = i == 2;
+                      c.dtcWatch(i == 5); // หน้า DTC: ให้เกจอ่านโค้ดต่อเนื่อง
                       setState(() => page = i);
                     },
-                    children: [_mainPage(th, blinkOn), _gridPage(th, blinkOn), _graphPage(th), _afrPage(th), _dragPage(th)],
+                    children: [_mainPage(th, blinkOn), _gridPage(th, blinkOn), _graphPage(th), _afrPage(th), _dragPage(th), _dtcPage(th)],
                   ),
                 ),
               ),
@@ -1299,7 +1539,7 @@ class _GaugePageState extends State<GaugePage> {
           left: 0, right: 0, bottom: 3,
           child: IgnorePointer(
             child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-              for (int i = 0; i < 5; i++)
+              for (int i = 0; i < 6; i++)
                 Container(
                   margin: const EdgeInsets.symmetric(horizontal: 3),
                   width: i == page ? 24 : 14, height: 5,
@@ -1310,7 +1550,7 @@ class _GaugePageState extends State<GaugePage> {
                   ),
                 ),
               const SizedBox(width: 8),
-              Text(const ['GAUGE', 'GRID', 'GRAPH', 'AFR LOG', 'DRAG LOG'][page], style: const TextStyle(fontFamily: kFont, fontSize: 7, color: Colors.white54)),
+              Text(const ['GAUGE', 'GRID', 'GRAPH', 'AFR LOG', 'DRAG LOG', 'DTC'][page], style: const TextStyle(fontFamily: kFont, fontSize: 7, color: Colors.white54)),
             ]),
           ),
         ),
@@ -1329,25 +1569,32 @@ class _GaugePageState extends State<GaugePage> {
   }
 
   // ----- หน้า 1: เกจ -----
+  // ซ้าย 3 + ขวา 3 ช่องเท่ากัน ; ความกว้างช่องคำนวณจากขนาดเกจ ให้ยาวเกือบชิดหน้าปัด
+  static const double _rpmTileH = 68;
+  static double _gaugeR(double h) => math.max(60.0, (h - _rpmTileH - 6) / 1.70);
   Widget _mainPage(AppTheme th, bool blinkOn) {
     final m = Cfg.i.main;
-    return Row(children: [
-      SizedBox(
-        width: 168,
-        child: Column(children: [
-          for (int i = 0; i < 3; i++) Expanded(child: _slotTile(m[i], () => pickKey(context, m, i), blinkOn)),
-        ]),
-      ),
-      const SizedBox(width: 8),
-      Expanded(child: LayoutBuilder(builder: (_, cs) => _center(cs, th))),
-      const SizedBox(width: 8),
-      SizedBox(
-        width: 168,
-        child: Column(children: [
-          for (int i = 3; i < 7; i++) Expanded(child: _slotTile(m[i], () => pickKey(context, m, i), blinkOn)),
-        ]),
-      ),
-    ]);
+    return LayoutBuilder(builder: (_, cs) {
+      final r = _gaugeR(cs.maxHeight);
+      final sw = ((cs.maxWidth - (2 * r + 8)) / 2 - 8).clamp(130.0, 280.0).toDouble();
+      return Row(children: [
+        SizedBox(
+          width: sw,
+          child: Column(children: [
+            for (int i = 0; i < 3; i++) Expanded(child: _slotTile(m[i], () => pickKey(context, m, i), blinkOn)),
+          ]),
+        ),
+        const SizedBox(width: 8),
+        Expanded(child: LayoutBuilder(builder: (_, cc) => _center(cc, th))),
+        const SizedBox(width: 8),
+        SizedBox(
+          width: sw,
+          child: Column(children: [
+            for (int i = 3; i < 6; i++) Expanded(child: _slotTile(m[i], () => pickKey(context, m, i), blinkOn)),
+          ]),
+        ),
+      ]);
+    });
   }
 
   // ----- หน้า 2: GRID 12 ช่อง -----
@@ -1712,6 +1959,163 @@ class _GaugePageState extends State<GaugePage> {
   // ----- หน้า 3: GRAPH (4 ช่อง แตะเพื่อเปิด/ปิดเส้นกราฟ ค่ายังแสดงในช่องเหมือนเดิม) -----
   static const _gNames = ['RPM', 'TPS', 'GPS', 'AFR'];
 
+  // ----- หน้า 6: DTC อ่านโค้ด / ลบโค้ด (ผ่านเกจ, เฉพาะกล่อง Honda) -----
+  Widget _dtcPage(AppTheme th) {
+    final t = c.t;
+    final conn = c.link == LinkState.connected;
+    final demo = c.demo;
+    final cur = demo ? const [[7, 1]] : t.dtcCur;
+    final sto = demo ? const [[21, 1], [12, 1]] : t.dtcSto;
+    final valid = demo || t.dtcValid;
+    String? msg;
+    Color msgCol = Colors.white70;
+    if (demo) {
+      msg = null;
+    } else if (!conn) {
+      msg = 'ยังไม่ได้เชื่อมต่อเกจ';
+      msgCol = kAmber;
+    } else if (!t.dtcSup) {
+      msg = 'เฟิร์มแวร์เกจยังไม่รองรับ DTC ผ่านแอพ — อัปเดตเป็น FW 1.0.14 ขึ้นไป';
+      msgCol = kAmber;
+    } else if (t.proto != 1) {
+      msg = 'อ่าน/ลบโค้ดได้เฉพาะกล่อง HONDA (K-LINE)';
+      msgCol = kAmber;
+    } else if (!t.fresh) {
+      msg = 'ไม่มีการเชื่อมต่อกับกล่อง ECU';
+      msgCol = kBad;
+    } else if (c.dtcReading || !valid) {
+      msg = 'กำลังอ่านโค้ดจากกล่อง ECU…';
+      msgCol = th.c2;
+    } else if (t.dtcClear == 1) {
+      msg = 'กำลังลบโค้ด…';
+      msgCol = th.c2;
+    } else if (t.dtcClear == 3) {
+      msg = 'ลบโค้ดไม่สำเร็จ (ลองบิดกุญแจ OFF-ON แล้วลบใหม่)';
+      msgCol = kBad;
+    } else if (cur.isEmpty && sto.isEmpty) {
+      msg = t.dtcClear == 2 ? 'ลบโค้ดเรียบร้อย — ไม่พบโค้ด' : 'ไม่พบโค้ด (NO CODES)';
+      msgCol = kGreen;
+    }
+    final canAct = demo || (conn && t.dtcSup && t.proto == 1 && t.fresh);
+    final last = c.dtcLastRead;
+    String lastTxt = '--';
+    if (last != null) {
+      final sec = DateTime.now().difference(last).inSeconds;
+      lastTxt = sec < 60 ? '${sec}s' : '${sec ~/ 60}:${(sec % 60).toString().padLeft(2, '0')}';
+    }
+
+    Widget row(List<int> d, bool now) {
+      final col = now ? kBad : kAmber;
+      final desc = dtcDesc(d[0], d[1]);
+      return Container(
+        margin: const EdgeInsets.only(bottom: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+        decoration: BoxDecoration(
+          color: col.withOpacity(0.10),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: col.withOpacity(0.55)),
+        ),
+        child: Row(children: [
+          Container(width: 9, height: 9, decoration: BoxDecoration(color: col, shape: BoxShape.circle, boxShadow: [BoxShadow(color: col, blurRadius: 6)])),
+          const SizedBox(width: 10),
+          Text('${d[0].toString().padLeft(2, '0')}-${d[1].toString().padLeft(2, '0')}',
+              style: TextStyle(fontFamily: kFont, fontSize: 13, color: Colors.white, shadows: [Shadow(color: col, blurRadius: 6)])),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(desc?.$2 ?? 'ไม่รู้จักโค้ดนี้', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
+              Text(desc?.$1 ?? 'Unknown code', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 10.5, color: Colors.white54)),
+            ]),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+            decoration: BoxDecoration(color: col.withOpacity(0.25), borderRadius: BorderRadius.circular(4)),
+            child: Text(now ? 'NOW' : 'PAST', style: TextStyle(fontFamily: kFont, fontSize: 8, color: col)),
+          ),
+        ]),
+      );
+    }
+
+    Widget bigBtn(String en, String thTxt, IconData ic, Color col, VoidCallback? f, {bool filled = false}) => Opacity(
+          opacity: f == null ? 0.4 : 1,
+          child: GestureDetector(
+            onTap: f,
+            child: Container(
+              decoration: BoxDecoration(
+                color: filled ? col.withOpacity(0.28) : Colors.black54,
+                borderRadius: BorderRadius.circular(11),
+                border: Border.all(color: col, width: 1.4),
+                boxShadow: [BoxShadow(color: col.withOpacity(filled ? 0.45 : 0.3), blurRadius: 10)],
+              ),
+              child: Container(
+                alignment: Alignment.center,
+                child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                  Icon(ic, color: Colors.white, size: 20),
+                  const SizedBox(width: 8),
+                  Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text(en, style: TextStyle(fontFamily: kFont, fontSize: 12, color: Colors.white, shadows: [Shadow(color: col, blurRadius: 8)])),
+                    Text(thTxt, style: const TextStyle(fontSize: 11, color: Colors.white70)),
+                  ]),
+                ]),
+              ),
+            ),
+          ),
+        );
+
+    return Row(children: [
+      SizedBox(
+        width: 210,
+        child: Column(children: [
+          Expanded(
+            child: Row(children: [
+              Expanded(child: StatTile(th: th, label: 'NOW', thLabel: 'ปัจจุบัน', unit: 'CODES', value: valid ? '${cur.length}' : '--', valueColor: cur.isEmpty ? null : kBad, valueSize: 26)),
+              const SizedBox(width: 6),
+              Expanded(child: StatTile(th: th, label: 'PAST', thLabel: 'เคยเกิด', unit: 'CODES', value: valid ? '${sto.length}' : '--', valueColor: sto.isEmpty ? null : kAmber, valueSize: 26)),
+            ]),
+          ),
+          Expanded(child: StatTile(th: th, label: 'LAST READ', thLabel: 'อ่านล่าสุด', unit: 'AGO', value: demo ? '3s' : lastTxt, valueSize: 22)),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: bigBtn('READ', 'อ่านโค้ด', Icons.search, th.c, canAct && !c.dtcReading ? c.dtcRead : null, filled: true),
+            ),
+          ),
+          Expanded(
+            child: bigBtn('CLEAR', 'ลบโค้ด', Icons.delete_sweep, kBad, canAct && t.dtcClear != 1
+                ? () async {
+                    if (await askYes(context, 'ลบโค้ด DTC', 'ลบโค้ดทั้งหมดในกล่อง ECU?\nควรดับเครื่องยนต์ (บิดกุญแจ ON) ก่อนลบ', ok: 'ลบโค้ด', col: kBad)) c.dtcClear();
+                  }
+                : null),
+          ),
+        ]),
+      ),
+      const SizedBox(width: 8),
+      Expanded(
+        child: _frame(
+          th,
+          Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              Text('DTC', style: TextStyle(fontFamily: kFont, fontSize: 13, color: th.c, shadows: [Shadow(color: th.c, blurRadius: 8)])),
+              const SizedBox(width: 10),
+              const Expanded(child: Text('รหัสปัญหาจากกล่อง ECU (HONDA)', style: TextStyle(fontSize: 12, color: Colors.white60))),
+              if (c.dtcReading) SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: th.c)),
+            ]),
+            const SizedBox(height: 8),
+            Expanded(
+              child: msg != null && (cur.isEmpty && sto.isEmpty || !valid || c.dtcReading || !canAct)
+                  ? Center(child: Text(msg, textAlign: TextAlign.center, style: TextStyle(fontSize: 14, color: msgCol, fontWeight: FontWeight.bold)))
+                  : ListView(children: [
+                      if (msg != null) Padding(padding: const EdgeInsets.only(bottom: 6), child: Text(msg, style: TextStyle(fontSize: 12, color: msgCol))),
+                      for (final d in cur) row(d, true),
+                      for (final d in sto) row(d, false),
+                    ]),
+            ),
+          ]),
+        ),
+      ),
+    ]);
+  }
+
   Widget _graphPage(AppTheme th) {
     final cfg = Cfg.i;
     return Column(children: [
@@ -1824,7 +2228,7 @@ class _GaugePageState extends State<GaugePage> {
         break;
     }
     return StatTile(
-      th: cfg.t, label: kd.name, unit: kd.unit, value: s, valueColor: vc,
+      th: cfg.t, label: kd.name, unit: kd.unit, value: s, valueColor: vc, thLabel: kd.th,
       alert: alert, blinkOn: blinkOn, bar: bar, barColor: bc, onTap: onTap, valueSize: vs,
     );
   }
@@ -1833,8 +2237,8 @@ class _GaugePageState extends State<GaugePage> {
   Widget _center(BoxConstraints cs, AppTheme th) {
     final cfg = Cfg.i;
     final w = cs.maxWidth, h = cs.maxHeight;
-    const tileH = 80.0;
-    final r = math.max(60.0, math.min(w / 2 - 4, (h - tileH - 8) / 1.74));
+    const tileH = _rpmTileH;
+    final r = math.max(60.0, math.min(w / 2 - 4, _gaugeR(h))); // เกจใหญ่ขึ้น: ช่อง RPM เตี้ยลงและชิดเกจขึ้น
     final cx = w / 2, cy = r + 4;
     final rpm = c.t.rpm;
     final frac = rpm == null ? 0.0 : (rpm / kMaxRpm).clamp(0.0, 1.0).toDouble();
@@ -1873,26 +2277,15 @@ class _GaugePageState extends State<GaugePage> {
         ),
       ),
       Positioned(
-        left: cx - tileW / 2, width: tileW, top: cy + 0.74 * r, height: tileH,
+        left: cx - tileW / 2, width: tileW, top: cy + 0.70 * r, height: tileH,
         child: StatTile(
-          th: th, label: 'RPM', unit: 'rpm', value: rpm == null ? '--' : rpm.toStringAsFixed(0),
+          th: th, label: 'RPM', thLabel: 'รอบเครื่อง', unit: 'rpm', value: rpm == null ? '--' : rpm.toStringAsFixed(0),
           bar: frac, barColor: (p) => rpmColor(p * kMaxRpm, cfg.shift),
-          mn: c.mnStr('rpm'), mx: c.mxStr('rpm'), bottomMargin: 0, valueSize: 26,
+          mn: c.mnStr('rpm'), mx: c.mxStr('rpm'), bottomMargin: 0, valueSize: 22,
         ),
       ),
     ]);
   }
-
-  Widget _chip(String s, Color col) => Container(
-        margin: const EdgeInsets.only(right: 6),
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        decoration: BoxDecoration(color: Colors.black54, border: Border.all(color: Colors.white24), borderRadius: BorderRadius.circular(6)),
-        child: Row(mainAxisSize: MainAxisSize.min, children: [
-          Container(width: 7, height: 7, decoration: BoxDecoration(color: col, shape: BoxShape.circle, boxShadow: [BoxShadow(color: col, blurRadius: 5)])),
-          const SizedBox(width: 6),
-          Text(s, style: const TextStyle(fontFamily: kFont, fontSize: 8.5)),
-        ]),
-      );
 
   Widget _btn(String s, VoidCallback f, AppTheme th, {bool active = false}) => InkWell(
         onTap: f,
@@ -1909,20 +2302,6 @@ class _GaugePageState extends State<GaugePage> {
         ),
       );
 
-  Widget _iconBtn(IconData ic, AppTheme th, VoidCallback f) => InkWell(
-        onTap: f,
-        borderRadius: BorderRadius.circular(6),
-        child: Container(
-          padding: const EdgeInsets.all(5),
-          decoration: BoxDecoration(
-            color: Colors.black45,
-            border: Border.all(color: th.c, width: 1.4),
-            borderRadius: BorderRadius.circular(6),
-            boxShadow: [BoxShadow(color: th.c.withOpacity(0.35), blurRadius: 8)],
-          ),
-          child: Icon(ic, size: 20, color: th.c),
-        ),
-      );
 }
 
 // ---------- กราฟ 4 เส้น (RPM / TPS / GPS / AFR) ----------
@@ -2063,10 +2442,11 @@ class StatTile extends StatelessWidget {
   final String? mn, mx;
   final VoidCallback? onTap;
   final double bottomMargin, valueSize;
+  final String thLabel; // ชื่อภาษาไทยต่อท้ายชื่อ (ว่าง = ไม่แสดง)
   const StatTile({
     super.key, required this.th, required this.label, required this.unit, required this.value,
     this.valueColor, this.alert = false, this.blinkOn = false, this.bar, this.barColor,
-    this.mn, this.mx, this.onTap, this.bottomMargin = 6, this.valueSize = 30,
+    this.mn, this.mx, this.onTap, this.bottomMargin = 6, this.valueSize = 30, this.thLabel = '',
   });
 
   @override
@@ -2101,7 +2481,15 @@ class StatTile extends StatelessWidget {
             padding: const EdgeInsets.fromLTRB(10, 7, 10, 5),
             child: Column(children: [
               Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                Flexible(child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontFamily: kFont, fontSize: 9, color: Colors.white54))),
+                Flexible(
+                  child: Text.rich(
+                    TextSpan(children: [
+                      TextSpan(text: label, style: const TextStyle(fontFamily: kFont, fontSize: 9, color: Colors.white)),
+                      if (thLabel.isNotEmpty) TextSpan(text: '  $thLabel', style: const TextStyle(fontSize: 11, color: Colors.white60)),
+                    ]),
+                    maxLines: 1, overflow: TextOverflow.ellipsis,
+                  ),
+                ),
                 Text(unit, style: const TextStyle(fontFamily: kFont, fontSize: 8, color: Colors.white38)),
               ]),
               Expanded(
@@ -2293,6 +2681,7 @@ class SettingsPage extends StatefulWidget {
 }
 
 class _SettingsPageState extends State<SettingsPage> {
+  int sec = 0; // เมนูย่อย: 0 CONNECT 1 ECU INFO 2 THEME 3 ALERT 4 LOGO 5 FIRMWARE
   ui.Image? preview;
   Uint8List? raw565;
   double? progress;
@@ -2382,34 +2771,176 @@ class _SettingsPageState extends State<SettingsPage> {
     setState(() => msg = err ?? 'คืนค่าโลโก้เดิมของบอร์ดแล้ว');
   }
 
+  static const _menu = <(IconData, String, String)>[
+    (Icons.bluetooth, 'CONNECT', 'เชื่อมต่อ'),
+    (Icons.info, 'ECU INFO', 'ข้อมูลกล่อง'),
+    (Icons.palette, 'THEME', 'ธีมสี'),
+    (Icons.notifications, 'ALERT', 'แจ้งเตือน'),
+    (Icons.image, 'LOGO', 'โลโก้เกจ'),
+    (Icons.memory, 'FIRMWARE', 'เฟิร์มแวร์'),
+  ];
+
+  Widget _menuItem(AppTheme th, int i) {
+    final m = _menu[i];
+    final on = sec == i;
+    return GestureDetector(
+      onTap: () => setState(() => sec = i),
+      child: Container(
+        height: 40,
+        margin: const EdgeInsets.only(bottom: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        decoration: BoxDecoration(
+          color: on ? th.c : Colors.black54,
+          borderRadius: BorderRadius.circular(9),
+          border: Border.all(color: on ? th.c : th.c.withOpacity(0.6), width: 1.2),
+          boxShadow: on ? [BoxShadow(color: th.c.withOpacity(0.6), blurRadius: 12)] : null,
+        ),
+        child: Row(children: [
+          Icon(m.$1, size: 18, color: on ? Colors.white : th.c),
+          const SizedBox(width: 10),
+          Text(m.$2, style: const TextStyle(fontFamily: kFont, fontSize: 10, color: Colors.white)),
+          const Spacer(),
+          Text(m.$3, style: TextStyle(fontSize: 11, color: on ? Colors.white70 : Colors.white54)),
+        ]),
+      ),
+    );
+  }
+
+  // ---- เมนูย่อย CONNECT: สถานะ BLE + ปุ่มเชื่อมต่อ / ตัดการเชื่อมต่อ / ค้นหาเกจ + GPS ----
+  Widget _connect(AppTheme th) {
+    final c = widget.c;
+    final cfg = Cfg.i;
+    final conn = c.link == LinkState.connected;
+    final (String, Color, String) st = switch (c.link) {
+      LinkState.connected => ('CONNECTED', kGreen, 'เชื่อมต่อกับเกจ ${c.gaugeName ?? ''} แล้ว'),
+      LinkState.connecting => ('CONNECTING', kAmber, 'กำลังเชื่อมต่อ ${c.gaugeName ?? ''}…'),
+      LinkState.scanning => ('SCANNING', kAmber, 'กำลังค้นหาเกจ…'),
+      LinkState.idle => ('OFFLINE', kBad, c.error ?? 'ยังไม่ได้เชื่อมต่อเกจ'),
+    };
+    final gps = c.gpsOk
+        ? '${c.satUsed ?? '-'} / ${c.satTotal ?? '-'} ดวง${c.gpsAccM != null ? ' · ±${c.gpsAccM!.toStringAsFixed(1)} m' : ''}'
+        : 'ยังไม่จับสัญญาณ';
+    return _panel(
+      th,
+      'CONNECT · BLE',
+      Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Container(width: 14, height: 14, decoration: BoxDecoration(color: st.$2, shape: BoxShape.circle, boxShadow: [BoxShadow(color: st.$2, blurRadius: 8)])),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(st.$1, style: TextStyle(fontFamily: kFont, fontSize: 16, color: st.$2)),
+              Text(st.$3, style: const TextStyle(fontSize: 12, color: Colors.white60)),
+            ]),
+          ),
+        ]),
+        const SizedBox(height: 12),
+        Wrap(spacing: 8, runSpacing: 8, children: [
+          if (conn) _action('ตัดการเชื่อมต่อ', Icons.link_off, th, c.disconnect),
+          _action(conn ? 'ค้นหา / เลือกเกจอื่น' : 'ค้นหา / เลือกเกจ', Icons.bluetooth_searching, th, () => pickGauge(context, c)),
+        ]),
+        const SizedBox(height: 12),
+        _infoRow('GAUGE', c.gaugeName ?? '--', col: conn ? kGreen : Colors.white54),
+        const SizedBox(height: 6),
+        _infoRow('AUTO CONNECT', 'ต่อใหม่อัตโนมัติถ้าหลุด (เฉพาะเกจที่เลือกไว้)'),
+        const SizedBox(height: 6),
+        _infoRow('GAUGE FW', c.t.fwText ?? '--'),
+        const SizedBox(height: 6),
+        _infoRow('GPS', gps, col: c.gpsOk ? kGreen : kAmber),
+        const SizedBox(height: 6),
+        Row(children: [
+          Expanded(child: _infoRow('SPEED SOURCE', cfg.speedGps ? 'GPS (มือถือ)' : 'ECU (กล่อง)')),
+          _action('สลับ', Icons.swap_horiz, th, cfg.toggleSpeed),
+        ]),
+      ]),
+    );
+  }
+
+  Widget _ecuInfo(AppTheme th) {
+    final c = widget.c;
+    final t = c.t;
+    final conn = c.link == LinkState.connected;
+    final demo = c.demo;
+    final live = demo || (conn && t.fresh);
+    final id = demo ? const [0x01, 0x01, 0x88, 0x0D, 0x01] : t.ecuId;
+    final idTxt = id == null ? '--' : ecmHex(id);
+    final model = id == null ? null : ecuModelName(id);
+    final dbId = id == null ? '' : ecmHex(id);
+    final part = EcuDb.part[dbId];
+    final typ = EcuDb.type[dbId];
+    String hx(int v) => v == 0 ? '-' : v.toRadixString(16).toUpperCase().padLeft(2, '0');
+    String mmss(int s) => '${(s ~/ 60).toString().padLeft(2, '0')}:${(s % 60).toString().padLeft(2, '0')}';
+    final proto = demo ? 1 : t.proto;
+    final (String, Color) st = !conn && !demo
+        ? ('ยังไม่ได้เชื่อมต่อเกจ', kAmber)
+        : live
+            ? ('CONNECTED', kGreen)
+            : (t.state == 0 ? ('CONNECTING...', kAmber) : ('NO RESPONSE', kBad));
+    final protoTxt = switch (proto) { 1 => 'HONDA K-LINE', 2 => 'OBD2 ${t.kwp ? 'KWP2000' : 'ISO9141'}', _ => '--' };
+    final age = demo ? 1 : t.ageDs;
+    final ageTxt = age >= 255 ? '--' : (age < 100 ? '${age * 100} ms' : '${age ~/ 10} s');
+    final batt = demo ? 14.1 : t.batt;
+    final sup = demo || t.infoSup;
+
+    Widget row(String a, String b, {Color? col, bool big = false}) => Padding(
+          padding: const EdgeInsets.symmetric(vertical: 5),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            SizedBox(width: 108, child: Text(a, style: const TextStyle(fontFamily: kFont, fontSize: 9, color: Colors.white54))),
+            Expanded(
+              child: Text(b,
+                  maxLines: 2, overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: big ? 15 : 13.5, fontWeight: FontWeight.bold, color: col ?? Colors.white)),
+            ),
+          ]),
+        );
+    Widget box(String title, List<Widget> rows) => Expanded(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(title, style: TextStyle(fontFamily: kFont, fontSize: 12, color: th.c, shadows: [Shadow(color: th.c, blurRadius: 8)])),
+            const SizedBox(height: 4),
+            ...rows,
+          ]),
+        );
+
+    return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      box('ECU', [
+        row('STATUS', st.$1, col: st.$2),
+        row('PROTOCOL', protoTxt),
+        row('ECU ID', idTxt, big: true),
+        row('BIKE', model ?? (id == null ? '--' : 'ไม่มีในฐานข้อมูล'), col: model != null ? th.c2 : Colors.white54),
+        row('PART CODE', (part == null || part.isEmpty) ? '--' : part),
+        row('ECU TYPE', typ == null ? '--' : typ.toUpperCase()),
+        row('TABLES', proto == 1 ? (demo ? '11 20 D1' : '${hx(t.tabA)} ${hx(t.tabB)} ${hx(t.tabS)}') : '--'),
+      ]),
+      const SizedBox(width: 16),
+      box('LINK', [
+        row('DATA RATE', live ? '${(demo ? 18.6 : t.hz).toStringAsFixed(1)} Hz' : '--'),
+        row('LAST DATA', sup ? ageTxt : '--', col: age <= 15 ? null : kAmber),
+        row('LINK TIME', live ? mmss(demo ? 207 : t.linkSec) : '--'),
+        row('BATTERY', batt == null || !live ? '--' : '${batt.toStringAsFixed(1)} V'),
+        row('MODEL SET', t.bike < kBikeNames.length ? kBikeNames[t.bike] : '--'),
+        row('GAUGE', conn ? (c.gaugeName ?? 'CONNECTED') : '--', col: conn ? kGreen : Colors.white54),
+        row('GAUGE FW', t.fwText ?? '--', col: t.fwText == kAppFw || !conn ? null : kAmber),
+        if (conn && !t.infoSup && !demo)
+          const Padding(
+            padding: EdgeInsets.only(top: 6),
+            child: Text('เฟิร์มแวร์เกจยังไม่ส่งข้อมูล ECU INFO — อัปเดตเป็น FW 1.0.14 ขึ้นไป', style: TextStyle(fontSize: 12, color: kAmber)),
+          ),
+      ]),
+    ]);
+  }
+
   @override
   Widget build(BuildContext context) {
     final cfg = Cfg.i;
     final th = cfg.t;
     final connected = widget.c.link == LinkState.connected;
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: Stack(fit: StackFit.expand, children: [
-        Image.asset('assets/bg.jpg', fit: BoxFit.cover),
-        Container(color: Colors.black.withOpacity(0.7)),
-        SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.all(12),
-            child: Column(children: [
-              Row(children: [
-                IconButton(onPressed: () => Navigator.of(context).pop(), icon: Icon(Icons.arrow_back, color: th.c)),
-                Text('SETTING', style: TextStyle(fontFamily: kFont, fontSize: 18, color: th.c, shadows: [Shadow(color: th.c, blurRadius: 10)])),
-              ]),
-              Expanded(
-                child: SingleChildScrollView(
-                  child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Expanded(
-                      child: Column(children: [
-                        _panel(th, 'ธีมสี', Wrap(spacing: 14, runSpacing: 14, children: [
+    final Widget body = switch (sec) {
+      0 => _connect(th),
+      1 => _panel(th, 'ECU INFO · ข้อมูลกล่อง', _ecuInfo(th)),
+      2 => _panel(th, 'ธีมสี', Wrap(spacing: 14, runSpacing: 14, children: [
                           for (int i = 0; i < kThemes.length; i++) _themeDot(i),
                         ])),
-                        const SizedBox(height: 12),
-                        _panel(
+      3 => _panel(
                           th,
                           'แจ้งเตือน',
                           Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -2424,33 +2955,7 @@ class _SettingsPageState extends State<SettingsPage> {
                             }),
                           ]),
                         ),
-                        const SizedBox(height: 12),
-                        _panel(
-                          th,
-                          'เฟิร์มแวร์',
-                          Builder(builder: (_) {
-                            final fw = widget.c.t.fwText;
-                            final connected = widget.c.link == LinkState.connected;
-                            return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                              _infoRow('เกจ (BLE)',
-                                  !connected ? 'ยังไม่ได้เชื่อมต่อ' : (fw != null ? 'FW $fw' : 'ไม่ทราบ (เฟิร์มแวร์เก่า)'),
-                                  col: !connected ? kAmber : (fw != null ? kGreen : kAmber)),
-                              const SizedBox(height: 6),
-                              _infoRow('แอพออกแบบสำหรับ', 'FW $kAppFw'),
-                              if (connected && fw != null && fw != kAppFw)
-                                const Padding(
-                                  padding: EdgeInsets.only(top: 6),
-                                  child: Text('เวอร์ชันเกจกับแอพไม่ตรงกัน — บางฟีเจอร์อาจทำงานไม่ครบ',
-                                      style: TextStyle(color: kAmber, fontSize: 11)),
-                                ),
-                            ]);
-                          }),
-                        ),
-                      ]),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: _panel(
+      4 => _panel(
                         th,
                         'โลโก้ MFB-PRO บนบอร์ด (TEST1)',
                         Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -2492,9 +2997,51 @@ class _SettingsPageState extends State<SettingsPage> {
                           if (msg != null) Padding(padding: const EdgeInsets.only(top: 8), child: Text(msg!, style: const TextStyle(fontSize: 12))),
                         ]),
                       ),
-                    ),
-                  ]),
-                ),
+      _ => _panel(
+                          th,
+                          'เฟิร์มแวร์',
+                          Builder(builder: (_) {
+                            final fw = widget.c.t.fwText;
+                            final connected = widget.c.link == LinkState.connected;
+                            return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                              _infoRow('เกจ (BLE)',
+                                  !connected ? 'ยังไม่ได้เชื่อมต่อ' : (fw != null ? 'FW $fw' : 'ไม่ทราบ (เฟิร์มแวร์เก่า)'),
+                                  col: !connected ? kAmber : (fw != null ? kGreen : kAmber)),
+                              const SizedBox(height: 6),
+                              _infoRow('แอพออกแบบสำหรับ', 'FW $kAppFw'),
+                              if (connected && fw != null && fw != kAppFw)
+                                const Padding(
+                                  padding: EdgeInsets.only(top: 6),
+                                  child: Text('เวอร์ชันเกจกับแอพไม่ตรงกัน — บางฟีเจอร์อาจทำงานไม่ครบ',
+                                      style: TextStyle(color: kAmber, fontSize: 11)),
+                                ),
+                            ]);
+                          }),
+                        ),
+    };
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Stack(fit: StackFit.expand, children: [
+        Image.asset('assets/bg.jpg', fit: BoxFit.cover),
+        Container(color: Colors.black.withOpacity(0.7)),
+        SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 6, 10, 8),
+            child: Column(children: [
+              Row(children: [
+                glowIconBtn(Icons.arrow_back, th, () => Navigator.of(context).pop()),
+                const SizedBox(width: 10),
+                Text('SETTING', style: TextStyle(fontFamily: kFont, fontSize: 18, color: th.c, shadows: [Shadow(color: th.c, blurRadius: 10)])),
+                const SizedBox(width: 16),
+                Expanded(child: Align(alignment: Alignment.centerRight, child: statusChips(widget.c))),
+              ]),
+              const SizedBox(height: 8),
+              Expanded(
+                child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  SizedBox(width: 210, child: ListView(children: [for (int i = 0; i < _menu.length; i++) _menuItem(th, i)])),
+                  const SizedBox(width: 10),
+                  Expanded(child: SingleChildScrollView(child: body)),
+                ]),
               ),
             ]),
           ),
