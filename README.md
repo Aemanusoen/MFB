@@ -1,5 +1,11 @@
 # MFB-PRO – ESP32 (BLE) + แอพ Flutter
 
+## แอพ 1.2.0 (คู่กับเกจ FW 1.0.14)
+- เปิดแอพ -> หน้าแรกเลือกเมนู GAUGE / TUNE / FLASH (ฟันเฟืองมุมขวาบน = SETTING) ทุกหน้ามีปุ่มย้อนกลับ
+- SETTING แบ่งเมนูย่อย: CONNECT (เชื่อมต่อ/ค้นหาเกจ, GPS) · ECU INFO · THEME · ALERT · LOGO · FIRMWARE
+- หน้า GAUGE: ช่องค่าซ้าย 3 ขวา 3 (ภาษาไทยต่อท้ายชื่อ) กว้างเกือบชิดเกจ, เกจใหญ่ขึ้น, ป้าย GPS บอกจำนวนดาวเทียม (ใช้อยู่/ทั้งหมด)
+- หน้า DTC (ปัดหน้าที่ 6): อ่าน/ลบโค้ดผ่านเกจ (Honda) — ต้องใช้เกจ FW 1.0.14
+
 ## 1) Firmware (ESP32 CYD)
 1. Library Manager -> ติดตั้ง **NimBLE-Arduino 1.4.x**
 2. คัดลอก `firmware/BleGauge.h` ไปไว้ในโฟลเดอร์ `Test1`
