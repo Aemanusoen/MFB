@@ -47,7 +47,7 @@
 
 #define FW_VER_MAJ     1        // เวอร์ชันเฟิร์มแวร์ (ส่งให้แอพแสดงในหน้า SETTING, ไบต์ 72..74 ของแพ็กเก็ต DATA)
 #define FW_VER_MIN     0
-#define FW_VER_PATCH   15
+#define FW_VER_PATCH   20
 #define BLE_NAME       "MFB-PRO"
 // ชื่อ BLE ไม่ซ้ำกันระหว่างเกจ: "MFB-PRO-" + 2 ไบต์ท้ายของ MAC ชิป (ไม่ต้องตั้งเอง ไม่หายตอนแฟลช FW)
 static char bleNameBuf[20] = "";
@@ -93,7 +93,7 @@ static bool logoOpen(File &f) {
   return true;
 }
 
-struct ImgMsg { uint8_t type; uint8_t len; uint8_t d[200]; };
+struct ImgMsg { uint8_t type; uint8_t len; uint8_t d[244]; };   // FW 1.0.20: ชิ้นละสูงสุด 244 ไบต์ (MTU 247)
 static QueueHandle_t imgQ = nullptr;
 
 static void imgTask(void*) {
@@ -273,10 +273,11 @@ class BleCmdCb : public NimBLECharacteristicCallbacks {
 class BleImgCb : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic* c) override {
     std::string v = c->getValue();
-    if (v.size() < 1 || v.size() > 201 || !imgQ) return;
+    if (v.size() < 1 || v.size() > 1 + sizeof(ImgMsg::d) || !imgQ) return;
     ImgMsg m; m.type = (uint8_t)v[0]; m.len = (uint8_t)(v.size() - 1);
     if (m.len) memcpy(m.d, v.data() + 1, m.len);
-    xQueueSend(imgQ, &m, pdMS_TO_TICKS(500));     // รอได้สูงสุด 0.5 วิ = backpressure ให้แอพส่งช้าลงถ้าเขียน Flash ไม่ทัน
+    // FW 1.0.20: แอพส่งแบบไม่รอตอบ -> รอคิวได้นานขึ้น (3 วิ) = backpressure ถ้าเขียน Flash ไม่ทัน (ข้อมูลไม่หาย)
+    if (xQueueSend(imgQ, &m, pdMS_TO_TICKS(3000)) != pdTRUE) DBG("[ble] img queue full - chunk dropped\n");   // ผลรวมตอนจบจะไม่ตรง -> แจ้งล้มเหลว
   }
 };
 
@@ -359,7 +360,7 @@ static void bleTask(void*) {
 
 static void bleStart() {
   NimBLEDevice::init(bleDevName());               // ชื่อไม่ซ้ำกัน: MFB-PRO-XXXX (XXXX จาก MAC ของชิป)
-  NimBLEDevice::setMTU(185);
+  NimBLEDevice::setMTU(247);                      // FW 1.0.20: 185 -> 247 ส่งไฟล์/โลโก้ชิ้นใหญ่ขึ้น
   NimBLEDevice::setPower(ESP_PWR_LVL_P6);
   bleServer = NimBLEDevice::createServer();
   bleServer->setCallbacks(new BleSrvCb());
@@ -367,9 +368,9 @@ static void bleStart() {
   bleData = svc->createCharacteristic(BLE_DATA_UUID, NIMBLE_PROPERTY::NOTIFY);
   NimBLECharacteristic* cmd = svc->createCharacteristic(BLE_CMD_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
   cmd->setCallbacks(new BleCmdCb());
-  NimBLECharacteristic* img = svc->createCharacteristic(BLE_IMG_UUID, NIMBLE_PROPERTY::WRITE);
+  NimBLECharacteristic* img = svc->createCharacteristic(BLE_IMG_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);   // FW 1.0.20: เขียนแบบไม่รอตอบได้ (ส่งเร็วขึ้น)
   img->setCallbacks(new BleImgCb());
-  imgQ = xQueueCreate(12, sizeof(ImgMsg));
+  imgQ = xQueueCreate(16, sizeof(ImgMsg));          // 16 x 246 B ~ 3.9 KB
   xTaskCreate(imgTask, "img", 5120, NULL, 1, NULL);
   svc->start();
   NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
