@@ -48,8 +48,8 @@ const kThemes = <AppTheme>[
 ];
 
 // เวอร์ชันเฟิร์มแวร์ที่แอพรุ่นนี้ออกแบบมาให้ใช้คู่กัน (แสดงเทียบในหน้า SETTING)
-const kAppFw = '1.0.14';
-const kAppVer = '1.2.3'; // เวอร์ชันแอพ (ตรงกับ pubspec.yaml)
+const kAppFw = '1.0.15';
+const kAppVer = '1.3.0'; // เวอร์ชันแอพ (ตรงกับ pubspec.yaml)
 
 // ---------- ค่าคีย์ที่แสดงได้ (เหมือน TEST1 + TOP SPD) ----------
 const int kTps = 0, kTemp = 1, kBatt = 2, kAfr = 3, kInj = 4, kIgn = 5, kRpm = 6, kMap = 7,
@@ -132,6 +132,7 @@ class Cfg extends ChangeNotifier {
   int graphOn = 15; // หน้า GRAPH: บิตเปิด-ปิดเส้นกราฟ RPM/TPS/GPS/AFR
   List<int> main = [kTps, kAfr, kIgn, kTemp, kEot, kBatt]; // ซ้าย 3 + ขวา 3
   List<int> grid = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+  List<int> center = [kRpm]; // ช่องใต้เกจ (เลือกค่าได้ ค่าเริ่มต้น RPM)
 
   AppTheme get t => kThemes[themeIdx];
 
@@ -153,6 +154,7 @@ class Cfg extends ChangeNotifier {
       graphOn = (p.getInt('gon') ?? 15) & 15;
       main = _parse(p.getString('main'), 6) ?? _parse(p.getString('main'), 7)?.sublist(0, 6) ?? main; // แอพรุ่นเก่าเก็บ 7 ช่อง -> ใช้ 6 ช่องแรก
       grid = _parse(p.getString('grid'), 12) ?? grid;
+      center = _parse(p.getString('ctr'), 1) ?? center;
     } catch (_) {}
   }
 
@@ -167,6 +169,7 @@ class Cfg extends ChangeNotifier {
       await p.setInt('gon', graphOn);
       await p.setString('main', main.join(','));
       await p.setString('grid', grid.join(','));
+      await p.setString('ctr', center.join(','));
     } catch (_) {}
   }
 
@@ -329,7 +332,7 @@ enum LinkState { idle, scanning, connecting, connected }
 Widget statusChip(String s, Color col, {String? extra, String? extra2}) => Container(
       margin: const EdgeInsets.only(right: 6),
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(color: Colors.black54, border: Border.all(color: Colors.white24), borderRadius: BorderRadius.circular(6)),
+      decoration: hudDeco(border: Colors.white24, radius: 6, color: Colors.black54),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
         Container(width: 7, height: 7, decoration: BoxDecoration(color: col, shape: BoxShape.circle, boxShadow: [BoxShadow(color: col, blurRadius: 5)])),
         const SizedBox(width: 6),
@@ -360,25 +363,120 @@ Widget statusChips(GaugeController c) {
   );
 }
 
-Widget mfbLogo(AppTheme th, {double size = 17}) => Text.rich(
-      TextSpan(children: [
-        const TextSpan(text: 'MFB-', style: TextStyle(color: kLogoRed, shadows: [Shadow(color: kLogoRed, blurRadius: 10)])),
-        TextSpan(text: 'PRO', style: TextStyle(color: th.c, shadows: [Shadow(color: th.c, blurRadius: 10)])),
-      ]),
-      style: TextStyle(fontFamily: kFont, fontSize: size),
-    );
+/// โลโก้หัวแอพ (ภาพ assets/logo.png พื้นโปร่งใส) — size 17 ≈ สูง 20 px
+Widget mfbLogo(AppTheme th, {double size = 17}) => Image.asset('assets/logo.png', height: size * 1.2, fit: BoxFit.contain, filterQuality: FilterQuality.medium);
+
+// ---------- สไตล์ HUD: กรอบตัดมุมซ้ายบน/ขวาล่าง + ขีดมุมขวาบน + เรืองแสงเบา ๆ (~10%) ----------
+class HudBorder extends ShapeBorder {
+  final double cut;
+  final BorderSide side;
+  final bool tick; // ขีดสั้นมุมขวาบน
+  const HudBorder({this.cut = 10, this.side = BorderSide.none, this.tick = true});
+
+  Path _path(Rect r, double c) {
+    c = math.min(c, math.min(r.width, r.height) / 2);
+    return Path()
+      ..moveTo(r.left + c, r.top)
+      ..lineTo(r.right, r.top)
+      ..lineTo(r.right, r.bottom - c)
+      ..lineTo(r.right - c, r.bottom)
+      ..lineTo(r.left, r.bottom)
+      ..lineTo(r.left, r.top + c)
+      ..close();
+  }
+
+  @override
+  EdgeInsetsGeometry get dimensions => EdgeInsets.all(side.width);
+  @override
+  Path getOuterPath(Rect rect, {TextDirection? textDirection}) => _path(rect, cut);
+  @override
+  Path getInnerPath(Rect rect, {TextDirection? textDirection}) => _path(rect.deflate(side.width), math.max(0.0, cut - side.width * 0.4));
+  @override
+  void paint(Canvas canvas, Rect rect, {TextDirection? textDirection}) {
+    if (side.style == BorderStyle.none || side.width <= 0) return;
+    final w = side.width;
+    canvas.drawPath(_path(rect.deflate(w / 2), math.max(0.0, cut - w * 0.2)), Paint()
+      ..color = side.color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = w
+      ..strokeJoin = StrokeJoin.miter);
+    if (tick && rect.width >= 60 && rect.height >= 26) {
+      final l = math.min(22.0, rect.width * 0.15);
+      canvas.drawRect(Rect.fromLTWH(rect.right - 6 - l, rect.top + w + 1.5, l, 2), Paint()..color = side.color.withOpacity(0.9));
+    }
+  }
+
+  @override
+  ShapeBorder scale(double t) => HudBorder(cut: cut * t, side: side.scale(t), tick: tick);
+  @override
+  ShapeBorder? lerpFrom(ShapeBorder? a, double t) => a is HudBorder ? HudBorder(cut: a.cut + (cut - a.cut) * t, side: BorderSide.lerp(a.side, side, t), tick: tick) : super.lerpFrom(a, t);
+  @override
+  ShapeBorder? lerpTo(ShapeBorder? b, double t) => b is HudBorder ? HudBorder(cut: cut + (b.cut - cut) * t, side: BorderSide.lerp(side, b.side, t), tick: tick) : super.lerpTo(b, t);
+  @override
+  bool operator ==(Object o) => o is HudBorder && o.cut == cut && o.side == side && o.tick == tick;
+  @override
+  int get hashCode => Object.hash(cut, side, tick);
+}
+
+/// กรอบ HUD สำเร็จรูป: เส้นขอบ + เรืองแสง 10% ของสีขอบ
+ShapeDecoration hudDeco({required Color border, double width = 1.1, double radius = 12, Color? color, Gradient? gradient, bool tick = true}) {
+  final cut = (radius * 0.9).clamp(4.0, 14.0).toDouble();
+  return ShapeDecoration(
+    color: gradient == null ? color : null,
+    gradient: gradient,
+    shape: HudBorder(cut: cut, side: BorderSide(color: border, width: width), tick: tick),
+    shadows: border.opacity == 0 ? null : [BoxShadow(color: border.withOpacity(0.10 * border.opacity.clamp(0.4, 1.0).toDouble()), blurRadius: 6, spreadRadius: 0.5)],
+  );
+}
+
+/// พื้นกริดจาง ๆ แบบ HUD (วางทับพื้นหลังทุกหน้า)
+class HudGrid extends StatelessWidget {
+  final Color? color;
+  const HudGrid({super.key, this.color});
+  @override
+  Widget build(BuildContext context) => IgnorePointer(child: CustomPaint(painter: _HudGridPainter(color ?? Cfg.i.t.c), size: Size.infinite));
+}
+
+class _HudGridPainter extends CustomPainter {
+  final Color c;
+  _HudGridPainter(this.c);
+  @override
+  void paint(Canvas canvas, Size size) {
+    final p = Paint()
+      ..color = c.withOpacity(0.05)
+      ..strokeWidth = 1;
+    for (double x = 0; x < size.width; x += 24) {
+      canvas.drawLine(Offset(x, 0), Offset(x, size.height), p);
+    }
+    for (double y = 0; y < size.height; y += 24) {
+      canvas.drawLine(Offset(0, y), Offset(size.width, y), p);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_HudGridPainter o) => o.c != c;
+}
+
+/// เส้นสแกนจาง ๆ ในช่องค่า
+class _ScanPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final p = Paint()..color = Colors.white.withOpacity(0.022);
+    for (double y = 0; y < size.height; y += 3) {
+      canvas.drawRect(Rect.fromLTWH(0, y, size.width, 1), p);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_ScanPainter o) => false;
+}
 
 Widget glowIconBtn(IconData ic, AppTheme th, VoidCallback f) => InkWell(
       onTap: f,
       borderRadius: BorderRadius.circular(6),
       child: Container(
         padding: const EdgeInsets.all(5),
-        decoration: BoxDecoration(
-          color: Colors.black45,
-          border: Border.all(color: th.c, width: 1.4),
-          borderRadius: BorderRadius.circular(6),
-          boxShadow: [BoxShadow(color: th.c.withOpacity(0.35), blurRadius: 8)],
-        ),
+        decoration: hudDeco(border: th.c, width: 1.4, radius: 6, color: Colors.black45),
         child: Icon(ic, size: 20, color: th.c),
       ),
     );
@@ -1061,6 +1159,17 @@ class GaugeController extends ChangeNotifier {
   /// ล้างผลแฟลชครั้งก่อนในเกจ (DONE/FAIL -> READY)
   Future<void> clearFlash() => sendCmd([0x12]);
 
+  /// สั่งเริ่มแฟลชจากมือถือ (FW 1.0.15): เกจเริ่มเฉพาะเมื่อขนาด + ผลรวมไบต์ตรงกับไฟล์ในเกจ และเงื่อนไขเดียวกับปุ่ม FLASH บนเกจ
+  Future<String?> startFlash(int size, int sum16) async {
+    if (link != LinkState.connected || _cmd == null) return 'ยังไม่ได้เชื่อมต่อเกจ';
+    try {
+      await sendCmd([0x13, size & 255, (size >> 8) & 255, (size >> 16) & 255, (size >> 24) & 255, sum16 & 255, (sum16 >> 8) & 255]);
+      return null;
+    } catch (e) {
+      return 'ส่งคำสั่งไม่สำเร็จ: $e';
+    }
+  }
+
   Future<String?> resetLogo() async {
     final ch = _imgCh;
     if (ch == null || link != LinkState.connected) return 'ยังไม่ได้เชื่อมต่อบอร์ด';
@@ -1305,45 +1414,57 @@ Future<void> pickKey(BuildContext context, List<int> arr, int idx) {
   final th = Cfg.i.t;
   return showDialog<void>(
     context: context,
-    builder: (dctx) => Dialog(
-      backgroundColor: Colors.transparent,
-      insetPadding: const EdgeInsets.all(12),
+    barrierDismissible: true, // แตะนอกกรอบเพื่อปิด
+    barrierColor: Colors.black.withOpacity(0.65),
+    builder: (dctx) => GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => Navigator.of(dctx).pop(),
       child: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 520),
-          child: Container(
-            padding: const EdgeInsets.all(14),
-            decoration: BoxDecoration(
-              color: const Color(0xF2060606),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: th.c, width: 1.2),
-              boxShadow: [BoxShadow(color: th.c.withOpacity(0.4), blurRadius: 14)],
+        child: GestureDetector(
+          onTap: () {}, // แตะในกรอบไม่ปิด
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 560),
+            child: Material(
+              color: Colors.transparent,
+              child: Container(
+                margin: const EdgeInsets.all(12),
+                padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
+                decoration: hudDeco(border: th.c, width: 1.3, radius: 15, color: const Color(0xF707080D)),
+                child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Row(children: [
+                    Text('SELECT', style: TextStyle(fontFamily: kFont, fontSize: 12, color: th.c)),
+                    const Spacer(),
+                    const Text('แตะนอกกรอบเพื่อปิด', style: TextStyle(fontSize: 10.5, color: Colors.white38)),
+                  ]),
+                  const SizedBox(height: 10),
+                  LayoutBuilder(builder: (_, cs) {
+                    final w = (cs.maxWidth - 6 * 4) / 5;
+                    return Wrap(spacing: 6, runSpacing: 6, children: [
+                      for (int k = 0; k < kKeys.length; k++)
+                        InkWell(
+                          onTap: () {
+                            Cfg.i.setSlot(arr, idx, k);
+                            Navigator.of(dctx).pop();
+                          },
+                          child: Container(
+                            width: w,
+                            padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
+                            alignment: Alignment.center,
+                            decoration: hudDeco(
+                                border: arr[idx] == k ? th.c : Colors.white24, width: arr[idx] == k ? 1.4 : 1, radius: 7,
+                                color: arr[idx] == k ? th.c.withOpacity(0.3) : Colors.black45, tick: false),
+                            child: Column(mainAxisSize: MainAxisSize.min, children: [
+                              Text(kKeys[k].name, style: const TextStyle(fontFamily: kFont, fontSize: 9)),
+                              const SizedBox(height: 2),
+                              Text(kKeys[k].th, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 10, color: Colors.white60)),
+                            ]),
+                          ),
+                        ),
+                    ]);
+                  }),
+                ]),
+              ),
             ),
-            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text('SELECT', style: TextStyle(fontFamily: kFont, fontSize: 12, color: th.c)),
-              const SizedBox(height: 10),
-              Wrap(spacing: 8, runSpacing: 8, children: [
-                for (int k = 0; k < kKeys.length; k++)
-                  InkWell(
-                    onTap: () {
-                      Cfg.i.setSlot(arr, idx, k);
-                      Navigator.of(dctx).pop();
-                    },
-                    borderRadius: BorderRadius.circular(6),
-                    child: Container(
-                      width: 92,
-                      padding: const EdgeInsets.symmetric(vertical: 9),
-                      alignment: Alignment.center,
-                      decoration: BoxDecoration(
-                        color: arr[idx] == k ? th.c.withOpacity(0.3) : Colors.black45,
-                        border: Border.all(color: arr[idx] == k ? th.c : Colors.white24, width: arr[idx] == k ? 1.6 : 1),
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                      child: Text(kKeys[k].name, style: const TextStyle(fontFamily: kFont, fontSize: 9)),
-                    ),
-                  ),
-              ]),
-            ]),
           ),
         ),
       ),
@@ -1390,12 +1511,7 @@ class _HomePageState extends State<HomePage> {
         child: GestureDetector(
           onTap: f,
           child: Container(
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: th.c, width: 1.6),
-              gradient: const LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [Color(0xE60B1430), Color(0xE605060B)]),
-              boxShadow: [BoxShadow(color: th.c.withOpacity(0.4), blurRadius: 18)],
-            ),
+            decoration: hudDeco(border: th.c, width: 1.6, radius: 16, gradient: const LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [Color(0xE60B1430), Color(0xE605060B)])),
             child: Stack(children: [
               Center(
                 child: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -1427,6 +1543,7 @@ class _HomePageState extends State<HomePage> {
       body: Stack(fit: StackFit.expand, children: [
         Image.asset('assets/bg.jpg', fit: BoxFit.cover),
         Container(color: Colors.black.withOpacity(0.55)),
+        const HudGrid(),
         SafeArea(
           child: Padding(
             padding: const EdgeInsets.fromLTRB(10, 6, 10, 6),
@@ -1507,6 +1624,7 @@ class _GaugePageState extends State<GaugePage> {
       body: Stack(fit: StackFit.expand, children: [
         Image.asset('assets/bg.jpg', fit: BoxFit.cover),
         Container(color: Colors.black.withOpacity(0.55)),
+        const HudGrid(),
         SafeArea(
           child: Padding(
             padding: const EdgeInsets.fromLTRB(10, 6, 10, 4),
@@ -1588,7 +1706,7 @@ class _GaugePageState extends State<GaugePage> {
           ]),
         ),
         const SizedBox(width: 8),
-        Expanded(child: LayoutBuilder(builder: (_, cc) => _center(cc, th))),
+        Expanded(child: LayoutBuilder(builder: (_, cc) => _center(cc, th, blinkOn))),
         const SizedBox(width: 8),
         SizedBox(
           width: sw,
@@ -1622,12 +1740,7 @@ class _GaugePageState extends State<GaugePage> {
   // ----- หน้า 4: DRAG LOG (จัดหน้าตาก่อน) -----
   Widget _frame(AppTheme th, Widget child, {EdgeInsets pad = const EdgeInsets.all(8)}) => Container(
         padding: pad,
-        decoration: BoxDecoration(
-          color: const Color(0xCC060606),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: th.c.withOpacity(0.85), width: 1.1),
-          boxShadow: [BoxShadow(color: th.c.withOpacity(0.3), blurRadius: 10)],
-        ),
+        decoration: hudDeco(border: th.c.withOpacity(0.85), width: 1.1, radius: 12, color: const Color(0xCC060606)),
         child: child,
       );
 
@@ -1704,11 +1817,7 @@ class _GaugePageState extends State<GaugePage> {
             height: 28,
             padding: const EdgeInsets.symmetric(horizontal: 10),
             alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: Colors.black45,
-              border: Border.all(color: col, width: 1.2),
-              borderRadius: BorderRadius.circular(7),
-            ),
+            decoration: hudDeco(border: col, width: 1.2, radius: 7, color: Colors.black45),
             child: Text(t, style: TextStyle(fontSize: 12, color: col, fontWeight: FontWeight.bold)),
           ),
         ),
@@ -1826,11 +1935,7 @@ class _GaugePageState extends State<GaugePage> {
                 child: Container(
                   padding: const EdgeInsets.symmetric(vertical: 9),
                   alignment: Alignment.center,
-                  decoration: BoxDecoration(
-                    color: c.dragSel == i ? th.c.withOpacity(0.3) : Colors.black45,
-                    border: Border.all(color: c.dragSel == i ? th.c : Colors.white24, width: c.dragSel == i ? 1.6 : 1),
-                    borderRadius: BorderRadius.circular(6),
-                  ),
+                  decoration: hudDeco(border: c.dragSel == i ? th.c : Colors.white24, width: c.dragSel == i ? 1.6 : 1, radius: 6, color: c.dragSel == i ? th.c.withOpacity(0.3) : Colors.black45),
                   child: Text('RUN ${i + 1}${c.runs[i].hasData ? ' ●' : ''}', style: const TextStyle(fontFamily: kFont, fontSize: 9)),
                 ),
               ),
@@ -1870,12 +1975,7 @@ class _GaugePageState extends State<GaugePage> {
         child: Container(
           padding: const EdgeInsets.symmetric(vertical: 9),
           alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: Colors.black45,
-            border: Border.all(color: kBad, width: 1.4),
-            borderRadius: BorderRadius.circular(6),
-            boxShadow: [BoxShadow(color: kBad.withOpacity(0.3), blurRadius: 8)],
-          ),
+          decoration: hudDeco(border: kBad, width: 1.4, radius: 6, color: Colors.black45),
           child: const Text('RESET LOG', style: TextStyle(fontFamily: kFont, fontSize: 10, color: kBad)),
         ),
       ),
@@ -2014,11 +2114,7 @@ class _GaugePageState extends State<GaugePage> {
       return Container(
         margin: const EdgeInsets.only(bottom: 6),
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-        decoration: BoxDecoration(
-          color: col.withOpacity(0.10),
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: col.withOpacity(0.55)),
-        ),
+        decoration: hudDeco(border: col.withOpacity(0.55), radius: 8, color: col.withOpacity(0.10)),
         child: Row(children: [
           Container(width: 9, height: 9, decoration: BoxDecoration(color: col, shape: BoxShape.circle, boxShadow: [BoxShadow(color: col, blurRadius: 6)])),
           const SizedBox(width: 10),
@@ -2045,12 +2141,7 @@ class _GaugePageState extends State<GaugePage> {
           child: GestureDetector(
             onTap: f,
             child: Container(
-              decoration: BoxDecoration(
-                color: filled ? col.withOpacity(0.28) : Colors.black54,
-                borderRadius: BorderRadius.circular(11),
-                border: Border.all(color: col, width: 1.4),
-                boxShadow: [BoxShadow(color: col.withOpacity(filled ? 0.45 : 0.3), blurRadius: 10)],
-              ),
+              decoration: hudDeco(border: col, width: 1.4, radius: 11, color: filled ? col.withOpacity(0.28) : Colors.black54),
               child: Container(
                 alignment: Alignment.center,
                 child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
@@ -2138,12 +2229,7 @@ class _GaugePageState extends State<GaugePage> {
       const SizedBox(height: 6),
       Expanded(
         child: Container(
-          decoration: BoxDecoration(
-            color: const Color(0xCC060606),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: th.c.withOpacity(0.85), width: 1.1),
-            boxShadow: [BoxShadow(color: th.c.withOpacity(0.35), blurRadius: 10)],
-          ),
+          decoration: hudDeco(border: th.c.withOpacity(0.85), width: 1.1, radius: 12, color: const Color(0xCC060606)),
           child: ClipRRect(
             borderRadius: BorderRadius.circular(11),
             child: CustomPaint(painter: GraphPainter(hist: c.gHist, on: cfg.graphOn), size: Size.infinite),
@@ -2162,12 +2248,7 @@ class _GaugePageState extends State<GaugePage> {
       onTap: () => Cfg.i.toggleGraph(i),
       child: Container(
         padding: const EdgeInsets.fromLTRB(8, 5, 8, 4),
-        decoration: BoxDecoration(
-          color: const Color(0xCC060606),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: on ? col : Colors.white24, width: on ? 1.6 : 1.0),
-          boxShadow: on ? [BoxShadow(color: col.withOpacity(0.4), blurRadius: 10)] : null,
-        ),
+        decoration: hudDeco(border: on ? col : Colors.white24, width: on ? 1.6 : 1.0, radius: 12, color: const Color(0xCC060606)),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
             Flexible(
@@ -2213,7 +2294,7 @@ class _GaugePageState extends State<GaugePage> {
   static double _frac(double? v, double lo, double hi) => v == null ? 0.0 : ((v - lo) / (hi - lo)).clamp(0.0, 1.0).toDouble();
 
   /// สร้างช่องค่าจากคีย์: สี/บาร์/กระพริบตามกฎ
-  Widget _slotTile(int key, VoidCallback onTap, bool blinkOn, {double vs = 30}) {
+  Widget _slotTile(int key, VoidCallback onTap, bool blinkOn, {double vs = 30, double bm = 6}) {
     final kd = kKeys[key];
     final cfg = Cfg.i;
     final v = c.keyVal(key);
@@ -2261,12 +2342,12 @@ class _GaugePageState extends State<GaugePage> {
     }
     return StatTile(
       th: cfg.t, label: kd.name, unit: kd.unit, value: s, valueColor: vc, thLabel: kd.th,
-      alert: alert, blinkOn: blinkOn, bar: bar, barColor: bc, onTap: onTap, valueSize: vs,
+      alert: alert, blinkOn: blinkOn, bar: bar, barColor: bc, onTap: onTap, valueSize: vs, bottomMargin: bm,
     );
   }
 
   // เกจกลาง: ความเร็ว (แตะสลับ GPS/ECU) อยู่กลางเกจ, RPM อยู่ใต้เกจ
-  Widget _center(BoxConstraints cs, AppTheme th) {
+  Widget _center(BoxConstraints cs, AppTheme th, bool blinkOn) {
     final cfg = Cfg.i;
     final w = cs.maxWidth, h = cs.maxHeight;
     const tileH = _rpmTileH;
@@ -2310,11 +2391,15 @@ class _GaugePageState extends State<GaugePage> {
       ),
       Positioned(
         left: cx - tileW / 2, width: tileW, top: cy + 0.70 * r, height: tileH,
-        child: StatTile(
-          th: th, label: 'RPM', thLabel: 'รอบเครื่อง', unit: 'rpm', value: rpm == null ? '--' : rpm.toStringAsFixed(0),
-          bar: frac, barColor: (p) => rpmColor(p * kMaxRpm, cfg.shift),
-          mn: c.mnStr('rpm'), mx: c.mxStr('rpm'), bottomMargin: 0, valueSize: 22,
-        ),
+        // ช่องใต้เกจ: แตะเพื่อเลือกค่า (RPM = มี ▼ต่ำสุด / ▲สูงสุด)
+        child: cfg.center[0] == kRpm
+            ? StatTile(
+                th: th, label: 'RPM', thLabel: 'รอบเครื่อง', unit: 'rpm', value: rpm == null ? '--' : rpm.toStringAsFixed(0),
+                bar: frac, barColor: (p) => rpmColor(p * kMaxRpm, cfg.shift),
+                mn: c.mnStr('rpm'), mx: c.mxStr('rpm'), bottomMargin: 0, valueSize: 22,
+                onTap: () => pickKey(context, cfg.center, 0),
+              )
+            : _slotTile(cfg.center[0], () => pickKey(context, cfg.center, 0), blinkOn, vs: 22, bm: 0),
       ),
     ]);
   }
@@ -2324,12 +2409,7 @@ class _GaugePageState extends State<GaugePage> {
         borderRadius: BorderRadius.circular(6),
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-          decoration: BoxDecoration(
-            color: active ? th.c.withOpacity(0.3) : Colors.black45,
-            border: Border.all(color: th.c, width: 1.4),
-            borderRadius: BorderRadius.circular(6),
-            boxShadow: [BoxShadow(color: th.c.withOpacity(0.35), blurRadius: 8)],
-          ),
+          decoration: hudDeco(border: th.c, width: 1.4, radius: 6, color: active ? th.c.withOpacity(0.3) : Colors.black45),
           child: Text(s, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
         ),
       );
@@ -2435,32 +2515,52 @@ class SegBar extends StatelessWidget {
   final double frac;
   final Color Function(double) color;
   final int n;
-  const SegBar({super.key, required this.frac, required this.color, this.n = 18});
+  const SegBar({super.key, required this.frac, required this.color, this.n = 24});
 
   @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      height: 6,
-      child: Row(children: [
-        for (int i = 0; i < n; i++)
-          Expanded(
-            child: Builder(builder: (_) {
-              final pos = (i + 0.5) / n;
-              final lit = pos <= frac;
-              final col = color(pos);
-              return Container(
-                margin: const EdgeInsets.symmetric(horizontal: 1),
-                decoration: BoxDecoration(
-                  color: lit ? col : Colors.white.withOpacity(0.12),
-                  borderRadius: BorderRadius.circular(1.5),
-                  boxShadow: lit ? [BoxShadow(color: col.withOpacity(0.6), blurRadius: 4)] : null,
-                ),
-              );
-            }),
-          ),
-      ]),
-    );
+  Widget build(BuildContext context) => SizedBox(height: 7, width: double.infinity, child: CustomPaint(painter: _SegPainter(frac, color, n)));
+}
+
+/// แท่งเซกเมนต์ทรงเอียง: ช่องที่ติดเรืองแสงตามสี, ช่องปลายสีขาว, ช่องที่ยังไม่ติดเป็นกรอบจาง
+class _SegPainter extends CustomPainter {
+  final double frac;
+  final Color Function(double) color;
+  final int n;
+  _SegPainter(this.frac, this.color, this.n);
+  @override
+  void paint(Canvas canvas, Size size) {
+    final h = size.height, sl = h * 0.55, gap = 2.4;
+    final w = (size.width - sl - gap * (n - 1)) / n;
+    int last = -1;
+    for (int i = 0; i < n; i++) {
+      if ((i + 0.5) / n <= frac) last = i;
+    }
+    for (int i = 0; i < n; i++) {
+      final x = i * (w + gap);
+      final path = Path()
+        ..moveTo(x + sl, 0)
+        ..lineTo(x + sl + w, 0)
+        ..lineTo(x + w, h)
+        ..lineTo(x, h)
+        ..close();
+      if (i <= last) {
+        final col = i == last ? Colors.white : color((i + 0.5) / n);
+        canvas.drawPath(path, Paint()
+          ..color = col.withOpacity(0.55)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 2.5));
+        canvas.drawPath(path, Paint()..color = col);
+      } else {
+        canvas.drawPath(path, Paint()..color = Colors.white.withOpacity(0.05));
+        canvas.drawPath(path, Paint()
+          ..color = Colors.white.withOpacity(0.11)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 0.8);
+      }
+    }
   }
+
+  @override
+  bool shouldRepaint(_SegPainter o) => o.frac != frac || o.n != n || o.color != color;
 }
 
 // ---------- กรอบแสดงค่า ----------
@@ -2491,22 +2591,18 @@ class StatTile extends StatelessWidget {
       onTap: onTap,
       child: Container(
         margin: EdgeInsets.only(bottom: bottomMargin),
-        decoration: BoxDecoration(
-          color: const Color(0xCC060606),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: col.withOpacity(active ? 1.0 : 0.85), width: active ? 2.0 : 1.1),
-          boxShadow: [BoxShadow(color: col.withOpacity(active ? 0.85 : 0.35), blurRadius: active ? 18 : 10)],
+        decoration: ShapeDecoration(
+          gradient: const LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Color(0xF50D1018), Color(0xF5050507)]),
+          shape: HudBorder(cut: 11, side: BorderSide(color: col.withOpacity(active ? 1.0 : 0.9), width: active ? 2.0 : 1.2), tick: false),
+          shadows: [BoxShadow(color: col.withOpacity(active ? 0.85 : 0.10), blurRadius: active ? 18 : 6, spreadRadius: 0.5)],
         ),
         child: Stack(children: [
+          Positioned.fill(child: IgnorePointer(child: CustomPaint(painter: _ScanPainter()))),
           Positioned(
-            top: 0, left: 12,
+            top: 3, left: 16,
             child: Container(
-              width: 38, height: 3,
-              decoration: BoxDecoration(
-                color: col,
-                borderRadius: const BorderRadius.vertical(bottom: Radius.circular(2)),
-                boxShadow: [BoxShadow(color: col, blurRadius: 6)],
-              ),
+              width: 30, height: 2,
+              decoration: BoxDecoration(color: col, boxShadow: [BoxShadow(color: col, blurRadius: 6)]),
             ),
           ),
           Padding(
@@ -2598,14 +2694,59 @@ class GaugePainter extends CustomPainter {
             ..strokeWidth = thick);
     }
 
-    // วงบางด้านใน + โซนแดงเริ่มที่ SHIFT RPM
+    // แสงขาวปลายแถบ (ช่องสุดท้ายที่ติด) วิ่งตามเข็ม — เรืองเบา ๆ
+    {
+      final li = (frac * n - 0.5).floor();
+      if (li >= 0) {
+        final a0 = start + seg * li + seg * 0.1, am = a0 + seg * 0.4;
+        final pt = c + Offset(math.cos(am), math.sin(am)) * (r - thick / 2);
+        canvas.drawCircle(pt, thick * 1.1, Paint()
+          ..shader = RadialGradient(colors: [Colors.white.withOpacity(0.45), Colors.white.withOpacity(0)])
+              .createShader(Rect.fromCircle(center: pt, radius: thick * 1.1)));
+        canvas.drawArc(rect, a0, seg * 0.8, false, Paint()
+          ..color = Colors.white.withOpacity(0.5)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = thick
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 2));
+        canvas.drawArc(rect, a0, seg * 0.8, false, Paint()
+          ..color = Colors.white
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = thick);
+        for (int k = 1; k <= 2 && li - k >= 0; k++) {
+          final b0 = start + seg * (li - k) + seg * 0.1;
+          canvas.drawArc(rect, b0, seg * 0.8, false, Paint()
+            ..color = Colors.white.withOpacity(0.25 / k)
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = thick);
+        }
+      }
+    }
+
+    // วงนอกบาง + ขีดละเอียดทุก 250 rpm
+    {
+      final ro = r + 3;
+      canvas.drawArc(Rect.fromCircle(center: c, radius: ro), start, sweep, false, Paint()
+        ..color = th.c.withOpacity(0.55)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1);
+      for (int k = 0; k <= 60; k++) {
+        final ang = start + sweep * k / 60;
+        final d = Offset(math.cos(ang), math.sin(ang));
+        final big = k % 4 == 0;
+        canvas.drawLine(c + d * ro, c + d * (ro + (big ? 5 : 3)), Paint()
+          ..color = Colors.white.withOpacity(big ? 0.55 : 0.18)
+          ..strokeWidth = big ? 1.4 : 0.8);
+      }
+    }
+
+    // วงสเกลด้านใน + โซนแดงเริ่มที่ SHIFT RPM
     final r2 = r * 0.80;
     final rect2 = Rect.fromCircle(center: c, radius: r2);
     canvas.drawArc(rect2, start, sweep, false,
         Paint()
-          ..color = Colors.white.withOpacity(0.2)
+          ..color = Colors.white.withOpacity(0.16)
           ..style = PaintingStyle.stroke
-          ..strokeWidth = 1.5);
+          ..strokeWidth = 1.2);
     final zs = (shift / kMaxRpm).clamp(0.0, 1.0).toDouble();
     if (zs < 1.0) {
       canvas.drawArc(rect2, start + sweep * zs, sweep * (1 - zs), false,
@@ -2614,6 +2755,21 @@ class GaugePainter extends CustomPainter {
             ..style = PaintingStyle.stroke
             ..strokeWidth = 2.6
             ..maskFilter = const MaskFilter.blur(BlurStyle.solid, 2));
+    }
+    // เส้นความคืบหน้าบาง ๆ สีธีม วิ่งตามเข็ม (ด้านในวงสเกล)
+    if (frac > 0) {
+      final ri = Rect.fromCircle(center: c, radius: r2 - 4);
+      canvas.drawArc(ri, start, sweep * frac, false, Paint()
+        ..color = th.c.withOpacity(0.7)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2
+        ..strokeCap = StrokeCap.round
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3));
+      canvas.drawArc(ri, start, sweep * frac, false, Paint()
+        ..color = th.c
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2
+        ..strokeCap = StrokeCap.round);
     }
 
     // ขีดและตัวเลข 0..15
@@ -2635,21 +2791,45 @@ class GaugePainter extends CustomPainter {
       tp.paint(canvas, pos - Offset(tp.width / 2, tp.height / 2));
     }
 
-    // เข็ม
+    // วงในแบบ HUD: เส้นประจาง ๆ + ขีดสีธีม 4 มุม (ล้อมตัวเลขความเร็ว)
+    {
+      final rh = r * 0.46;
+      final dash = Paint()
+        ..color = Colors.white.withOpacity(0.18)
+        ..strokeWidth = 1;
+      const nd = 72;
+      for (int k = 0; k < nd; k++) {
+        final a0 = 2 * math.pi * k / nd;
+        canvas.drawArc(Rect.fromCircle(center: c, radius: rh), a0, 2 * math.pi / nd * 0.35, false, dash..style = PaintingStyle.stroke);
+      }
+      final corner = Paint()
+        ..color = th.c.withOpacity(0.85)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2;
+      for (final q in [-0.25, 0.25, 0.75, 1.25]) {
+        canvas.drawArc(Rect.fromCircle(center: c, radius: rh), q * math.pi - 0.16, 0.32, false, corner);
+      }
+    }
+
+    // เข็มทรงเรียว: โคนกว้าง ปลายแหลม + เรืองสีธีม + จุดขาวที่ปลาย
     final ang = start + sweep * frac;
     final dir = Offset(math.cos(ang), math.sin(ang));
-    final p1 = c + dir * (r * 0.36), p2 = c + dir * (r * 0.78);
-    canvas.drawLine(p1, p2,
-        Paint()
-          ..color = th.c
-          ..strokeWidth = 5
-          ..strokeCap = StrokeCap.round
-          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 5));
-    canvas.drawLine(p1, p2,
-        Paint()
-          ..color = Colors.white
-          ..strokeWidth = 2.2
-          ..strokeCap = StrokeCap.round);
+    final nrm = Offset(-dir.dy, dir.dx);
+    final p1 = c + dir * (r * 0.48), p2 = c + dir * (r * 0.80);
+    const w0 = 3.2;
+    Path needle(double w) => Path()
+      ..moveTo((p1 + nrm * w).dx, (p1 + nrm * w).dy)
+      ..lineTo(p2.dx, p2.dy)
+      ..lineTo((p1 - nrm * w).dx, (p1 - nrm * w).dy)
+      ..close();
+    canvas.drawPath(needle(w0 * 1.6), Paint()
+      ..color = th.c.withOpacity(0.9)
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 5));
+    canvas.drawPath(needle(w0), Paint()..color = Colors.white);
+    canvas.drawCircle(p2, 1.8, Paint()..color = Colors.white);
+    canvas.drawCircle(p2, 3.5, Paint()
+      ..color = Colors.white.withOpacity(0.5)
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3));
   }
 
   @override
@@ -2693,11 +2873,7 @@ class _StepBtnState extends State<StepBtn> {
       child: Container(
         width: 38, height: 34,
         alignment: Alignment.center,
-        decoration: BoxDecoration(
-          color: Colors.black45,
-          border: Border.all(color: widget.th.c, width: 1.4),
-          borderRadius: BorderRadius.circular(6),
-        ),
+        decoration: hudDeco(border: widget.th.c, width: 1.4, radius: 6, color: Colors.black45),
         child: Text(widget.label, style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: widget.th.c, height: 1.1)),
       ),
     );
@@ -2821,12 +2997,7 @@ class _SettingsPageState extends State<SettingsPage> {
         height: 40,
         margin: const EdgeInsets.only(bottom: 6),
         padding: const EdgeInsets.symmetric(horizontal: 12),
-        decoration: BoxDecoration(
-          color: on ? th.c : Colors.black54,
-          borderRadius: BorderRadius.circular(9),
-          border: Border.all(color: on ? th.c : th.c.withOpacity(0.6), width: 1.2),
-          boxShadow: on ? [BoxShadow(color: th.c.withOpacity(0.6), blurRadius: 12)] : null,
-        ),
+        decoration: hudDeco(border: on ? th.c : th.c.withOpacity(0.6), width: 1.2, radius: 9, color: on ? th.c : Colors.black54),
         child: Row(children: [
           Icon(m.$1, size: 18, color: on ? Colors.white : th.c),
           const SizedBox(width: 10),
@@ -2988,12 +3159,7 @@ class _SettingsPageState extends State<SettingsPage> {
                           Center(
                             child: Container(
                               width: 220, height: 165,
-                              decoration: BoxDecoration(
-                                color: Colors.black,
-                                borderRadius: BorderRadius.circular(8),
-                                border: Border.all(color: th.c, width: 1.4),
-                                boxShadow: [BoxShadow(color: th.c.withOpacity(0.4), blurRadius: 10)],
-                              ),
+                              decoration: hudDeco(border: th.c, width: 1.4, radius: 8, color: Colors.black),
                               child: ClipRRect(
                                 borderRadius: BorderRadius.circular(7),
                                 child: preview == null
@@ -3050,6 +3216,7 @@ class _SettingsPageState extends State<SettingsPage> {
       body: Stack(fit: StackFit.expand, children: [
         Image.asset('assets/bg.jpg', fit: BoxFit.cover),
         Container(color: Colors.black.withOpacity(0.7)),
+        const HudGrid(),
         SafeArea(
           child: Padding(
             padding: const EdgeInsets.fromLTRB(10, 6, 10, 8),
@@ -3108,12 +3275,7 @@ class _SettingsPageState extends State<SettingsPage> {
   Widget _panel(AppTheme th, String title, Widget child) => Container(
         width: double.infinity,
         padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: const Color(0xCC060606),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: th.c.withOpacity(0.8), width: 1.1),
-          boxShadow: [BoxShadow(color: th.c.withOpacity(0.3), blurRadius: 10)],
-        ),
+        decoration: hudDeco(border: th.c.withOpacity(0.8), width: 1.1, radius: 12, color: const Color(0xCC060606)),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
           const SizedBox(height: 12),
@@ -3150,7 +3312,7 @@ class _SettingsPageState extends State<SettingsPage> {
           borderRadius: BorderRadius.circular(6),
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-            decoration: BoxDecoration(color: Colors.black45, border: Border.all(color: th.c, width: 1.3), borderRadius: BorderRadius.circular(6)),
+            decoration: hudDeco(border: th.c, width: 1.3, radius: 6, color: Colors.black45),
             child: Row(mainAxisSize: MainAxisSize.min, children: [
               Icon(ic, size: 16, color: th.c),
               const SizedBox(width: 6),
@@ -4306,7 +4468,7 @@ Future<void> pickGauge(BuildContext context, GaugeController c) async {
 
       return AlertDialog(
         backgroundColor: const Color(0xFF14141A),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14), side: BorderSide(color: th.c, width: 1.3)),
+        shape: HudBorder(cut: 13, side: BorderSide(color: th.c, width: 1.3)),
         title: Row(children: [
           Expanded(child: Text('เลือกเกจที่จะเชื่อมต่อ', style: TextStyle(fontSize: 17, color: th.c, fontWeight: FontWeight.bold))),
           if (scanning) const Text('กำลังสแกน…', style: TextStyle(fontSize: 12.5, color: kAmber)),
@@ -4330,11 +4492,7 @@ Future<void> pickGauge(BuildContext context, GaugeController c) async {
                       child: Container(
                         margin: const EdgeInsets.only(bottom: 6),
                         padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
-                        decoration: BoxDecoration(
-                          color: last ? th.c.withOpacity(0.18) : Colors.white.withOpacity(0.04),
-                          border: Border.all(color: last ? th.c : Colors.white24, width: last ? 1.5 : 1),
-                          borderRadius: BorderRadius.circular(10),
-                        ),
+                        decoration: hudDeco(border: last ? th.c : Colors.white24, width: last ? 1.5 : 1, radius: 10, color: last ? th.c.withOpacity(0.18) : Colors.white.withOpacity(0.04)),
                         child: Row(children: [
                           Expanded(
                             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -4635,11 +4793,7 @@ class _AfrLogPageState extends State<AfrLogPage> {
             height: 32,
             padding: const EdgeInsets.symmetric(horizontal: 12),
             alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: active ? col.withOpacity(0.22) : Colors.black45,
-              border: Border.all(color: col, width: 1.3),
-              borderRadius: BorderRadius.circular(8),
-            ),
+            decoration: hudDeco(border: col, width: 1.3, radius: 8, color: active ? col.withOpacity(0.22) : Colors.black45),
             child: Text(t, style: TextStyle(fontSize: 13, color: col, fontWeight: FontWeight.bold)),
           ),
         ),
@@ -4686,11 +4840,7 @@ class _AfrLogPageState extends State<AfrLogPage> {
             const SizedBox(height: 4),
             Expanded(
               child: Container(
-                decoration: BoxDecoration(
-                  color: const Color(0xCC060606),
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: th.c.withOpacity(0.85), width: 1.1),
-                ),
+                decoration: hudDeco(border: th.c.withOpacity(0.85), width: 1.1, radius: 10, color: const Color(0xCC060606)),
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(9),
                   child: log.ready
@@ -5603,7 +5753,7 @@ class _TunePageState extends State<TunePage> {
                 child: Container(
                   width: 34,
                   height: 34,
-                  decoration: BoxDecoration(color: const Color(0xFF12161C), border: Border.all(color: bc), borderRadius: BorderRadius.circular(9)),
+                  decoration: hudDeco(border: bc, radius: 9, color: const Color(0xFF12161C)),
                   child: Icon(ic, color: fc, size: 16),
                 ),
               );
@@ -5614,11 +5764,7 @@ class _TunePageState extends State<TunePage> {
                   child: Container(
                     height: 30,
                     alignment: Alignment.center,
-                    decoration: BoxDecoration(
-                      color: tab == i ? th.c.withOpacity(0.18) : const Color(0xFF12161C),
-                      border: Border.all(color: tab == i ? th.c : Colors.white24, width: tab == i ? 1.3 : 1),
-                      borderRadius: BorderRadius.circular(9),
-                    ),
+                    decoration: hudDeco(border: tab == i ? th.c : Colors.white24, width: tab == i ? 1.3 : 1, radius: 9, color: tab == i ? th.c.withOpacity(0.18) : const Color(0xFF12161C)),
                     child: Text(t, style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: tab == i ? Colors.white : Colors.white60)),
                   ),
                 ),
@@ -5632,11 +5778,7 @@ class _TunePageState extends State<TunePage> {
                     height: 26,
                     padding: const EdgeInsets.symmetric(horizontal: 10),
                     alignment: Alignment.center,
-                    decoration: BoxDecoration(
-                      color: on ? th.c.withOpacity(0.22) : const Color(0xFF12161C),
-                      border: Border.all(color: on ? th.c2 : Colors.white24),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
+                    decoration: hudDeco(border: on ? th.c2 : Colors.white24, radius: 8, color: on ? th.c.withOpacity(0.22) : const Color(0xFF12161C)),
                     child: Text(t, style: TextStyle(fontSize: 11.5, color: on ? Colors.white : Colors.white70)),
                   ),
                 ),
@@ -5654,11 +5796,7 @@ class _TunePageState extends State<TunePage> {
               child: Container(
                 margin: const EdgeInsets.only(bottom: 5),
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                  color: on ? const Color(0xFF0E1D16) : const Color(0xFF0F1013),
-                  border: Border.all(color: on ? kGreen.withOpacity(0.7) : Colors.white12),
-                  borderRadius: BorderRadius.circular(10),
-                ),
+                decoration: hudDeco(border: on ? kGreen.withOpacity(0.7) : Colors.white12, radius: 10, color: on ? const Color(0xFF0E1D16) : const Color(0xFF0F1013)),
                 child: Row(children: [
                   RichText(
                     text: TextSpan(style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.bold, color: Colors.white), children: [
@@ -5672,10 +5810,7 @@ class _TunePageState extends State<TunePage> {
                     Container(
                       margin: const EdgeInsets.only(left: 6),
                       padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 1),
-                      decoration: BoxDecoration(
-                        border: Border.all(color: on ? kGreen.withOpacity(0.7) : Colors.white24),
-                        borderRadius: BorderRadius.circular(6),
-                      ),
+                      decoration: hudDeco(border: on ? kGreen.withOpacity(0.7) : Colors.white24, radius: 6),
                       child: Text(ecmHex(o.ecuId), style: TextStyle(fontSize: 10, color: on ? kGreen : Colors.white54)),
                     ),
                   Padding(
@@ -5695,7 +5830,7 @@ class _TunePageState extends State<TunePage> {
           return Dialog(
             backgroundColor: const Color(0xFF0C0D10),
             insetPadding: EdgeInsets.symmetric(horizontal: sz.width * 0.1, vertical: 12),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16), side: BorderSide(color: th.c, width: 1.2)),
+            shape: HudBorder(cut: 14, side: BorderSide(color: th.c, width: 1.2)),
             child: Column(mainAxisSize: MainAxisSize.min, children: [
               // หัว (ย่อให้เตี้ย เพื่อให้เห็นรายการไฟล์ได้มากขึ้น)
               Container(
@@ -5705,7 +5840,7 @@ class _TunePageState extends State<TunePage> {
                   Container(
                     width: 34,
                     height: 34,
-                    decoration: BoxDecoration(color: const Color(0xFF15090B), border: Border.all(color: th.c), borderRadius: BorderRadius.circular(9)),
+                    decoration: hudDeco(border: th.c, radius: 9, color: const Color(0xFF15090B)),
                     child: Icon(Icons.memory, color: th.c, size: 18),
                   ),
                   const SizedBox(width: 10),
@@ -5909,11 +6044,7 @@ class _TunePageState extends State<TunePage> {
           width: double.infinity,
           margin: const EdgeInsets.only(top: 10),
           padding: const EdgeInsets.all(10),
-          decoration: BoxDecoration(
-            color: col.withOpacity(0.12),
-            border: Border.all(color: col, width: 1.2),
-            borderRadius: BorderRadius.circular(8),
-          ),
+          decoration: hudDeco(border: col, width: 1.2, radius: 8, color: col.withOpacity(0.12)),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Text(head, style: TextStyle(fontWeight: FontWeight.bold, color: col, fontSize: 13)),
             const SizedBox(height: 4),
@@ -5937,7 +6068,7 @@ class _TunePageState extends State<TunePage> {
             ]);
         return AlertDialog(
         backgroundColor: const Color(0xFF14141A),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12), side: BorderSide(color: th.c, width: 1.2)),
+        shape: HudBorder(cut: 11, side: BorderSide(color: th.c, width: 1.2)),
         insetPadding: EdgeInsets.symmetric(horizontal: 40, vertical: kb ? 4 : 24),
         titlePadding: kb ? EdgeInsets.zero : const EdgeInsets.fromLTRB(24, 20, 24, 0),
         contentPadding: kb ? const EdgeInsets.fromLTRB(16, 6, 8, 6) : const EdgeInsets.fromLTRB(24, 16, 24, 8),
@@ -6267,6 +6398,7 @@ class _TunePageState extends State<TunePage> {
       body: Stack(fit: StackFit.expand, children: [
         Image.asset('assets/bg.jpg', fit: BoxFit.cover),
         Container(color: Colors.black.withOpacity(0.84)),
+        const HudGrid(),
         SafeArea(
           child: Padding(
             padding: const EdgeInsets.fromLTRB(8, 4, 8, 4),
@@ -6312,12 +6444,7 @@ class _TunePageState extends State<TunePage> {
             width: width,
             padding: const EdgeInsets.symmetric(horizontal: 8),
             alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: active ? cc.withOpacity(0.3) : Colors.black45,
-              border: Border.all(color: cc, width: 1.3),
-              borderRadius: BorderRadius.circular(8),
-              boxShadow: active ? [BoxShadow(color: cc.withOpacity(0.4), blurRadius: 8)] : null,
-            ),
+            decoration: hudDeco(border: cc, width: 1.3, radius: 8, color: active ? cc.withOpacity(0.3) : Colors.black45),
             child: DefaultTextStyle.merge(style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold), child: child),
           ),
         ),
@@ -6451,7 +6578,7 @@ class _TunePageState extends State<TunePage> {
       Material(
         color: const Color(0xF4141018),
         elevation: 10,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14), side: BorderSide(color: th.c, width: 1.4)),
+        shape: HudBorder(cut: 13, side: BorderSide(color: th.c, width: 1.4)),
         child: Padding(
           padding: const EdgeInsets.fromLTRB(8, 7, 4, 7),
           child: SingleChildScrollView(
@@ -6563,7 +6690,7 @@ class _TunePageState extends State<TunePage> {
           height: 34,
           padding: const EdgeInsets.symmetric(horizontal: 9),
           alignment: Alignment.center,
-          decoration: BoxDecoration(color: Colors.black45, border: Border.all(color: th.c, width: 1.3), borderRadius: BorderRadius.circular(8)),
+          decoration: hudDeco(border: th.c, width: 1.3, radius: 8, color: Colors.black45),
           child: const Text('ไฟล์ ▾', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
         ),
       ),
@@ -6605,11 +6732,7 @@ class _TunePageState extends State<TunePage> {
           constraints: const BoxConstraints(maxWidth: 560),
           margin: const EdgeInsets.all(8),
           padding: const EdgeInsets.fromLTRB(28, 18, 28, 26),
-          decoration: BoxDecoration(
-            color: const Color(0xE60E0E14),
-            borderRadius: BorderRadius.circular(24),
-            border: Border.all(color: Colors.white24, width: 1.2),
-          ),
+          decoration: hudDeco(border: Colors.white24, width: 1.2, radius: 24, color: const Color(0xE60E0E14)),
           child: Column(mainAxisSize: MainAxisSize.min, children: [
             Align(
               alignment: Alignment.centerLeft,
@@ -6625,12 +6748,7 @@ class _TunePageState extends State<TunePage> {
               borderRadius: BorderRadius.circular(26),
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 34, vertical: 14),
-                decoration: BoxDecoration(
-                  color: th.c.withOpacity(0.85),
-                  borderRadius: BorderRadius.circular(26),
-                  border: Border.all(color: th.c2.withOpacity(0.6)),
-                  boxShadow: [BoxShadow(color: th.c.withOpacity(0.4), blurRadius: 12)],
-                ),
+                decoration: hudDeco(border: th.c2.withOpacity(0.6), radius: 26, color: th.c.withOpacity(0.85)),
                 child: Text(btn, style: const TextStyle(fontSize: 14.5, fontWeight: FontWeight.bold, color: Colors.white)),
               ),
             ),
@@ -6691,12 +6809,7 @@ class _TunePageState extends State<TunePage> {
       hi = _fHi!;
     }
     final lp = _livePos(t);
-    final frame = BoxDecoration(
-      color: const Color(0xCC060606),
-      borderRadius: BorderRadius.circular(10),
-      border: Border.all(color: th.c.withOpacity(0.85), width: 1.1),
-      boxShadow: [BoxShadow(color: th.c.withOpacity(0.3), blurRadius: 10)],
-    );
+    final frame = hudDeco(border: th.c.withOpacity(0.85), width: 1.1, radius: 10, color: const Color(0xCC060606));
     final rowL = s.axisLabels(t, false), colL = s.axisLabels(t, true);
     if (view3d) {
       return Container(
@@ -6822,7 +6935,7 @@ class _TunePageState extends State<TunePage> {
             bottom: 8,
             child: Material(
               color: const Color(0xF20C0C12),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14), side: BorderSide(color: th.c, width: 1.2)),
+              shape: HudBorder(cut: 13, side: BorderSide(color: th.c, width: 1.2)),
               child: StatefulBuilder(builder: (dctx, setM) {
                 Widget section(IconData ic, String title, int n, bool open, VoidCallback toggle, List<Widget> kids) => Column(children: [
                       InkWell(
@@ -6831,11 +6944,7 @@ class _TunePageState extends State<TunePage> {
                         child: Container(
                           margin: const EdgeInsets.only(bottom: 5),
                           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                          decoration: BoxDecoration(
-                            color: Colors.white.withOpacity(0.05),
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(color: th.c.withOpacity(0.6)),
-                          ),
+                          decoration: hudDeco(border: th.c.withOpacity(0.6), radius: 12, color: Colors.white.withOpacity(0.05)),
                           child: Row(children: [
                             Icon(ic, color: th.c2, size: 18),
                             const SizedBox(width: 10),
@@ -6862,11 +6971,7 @@ class _TunePageState extends State<TunePage> {
                       child: Container(
                         margin: const EdgeInsets.only(bottom: 4, left: 6),
                         padding: EdgeInsets.symmetric(horizontal: 8, vertical: sub.isEmpty ? 7 : 5),
-                        decoration: BoxDecoration(
-                          color: on ? th.c.withOpacity(0.2) : Colors.white.withOpacity(0.03),
-                          border: Border.all(color: on ? th.c : Colors.white12, width: on ? 1.5 : 1),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
+                        decoration: hudDeco(border: on ? th.c : Colors.white12, width: on ? 1.5 : 1, radius: 8, color: on ? th.c.withOpacity(0.2) : Colors.white.withOpacity(0.03)),
                         child: Row(children: [
                           lead,
                           if (lead is! SizedBox) const SizedBox(width: 8),
@@ -6919,7 +7024,7 @@ class _TunePageState extends State<TunePage> {
                           child: Container(
                             margin: const EdgeInsets.only(bottom: 5, left: 6),
                             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
-                            decoration: BoxDecoration(color: Colors.white.withOpacity(0.03), border: Border.all(color: Colors.white12), borderRadius: BorderRadius.circular(8)),
+                            decoration: hudDeco(border: Colors.white12, radius: 8, color: Colors.white.withOpacity(0.03)),
                             child: Row(children: [
                               Expanded(
                                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -6961,11 +7066,7 @@ class _TunePageState extends State<TunePage> {
           width: 44, height: 24,
           padding: const EdgeInsets.all(3),
           alignment: on ? Alignment.centerRight : Alignment.centerLeft,
-          decoration: BoxDecoration(
-            color: on ? th.c.withOpacity(0.35) : Colors.white10,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: on ? th.c : Colors.white30),
-          ),
+          decoration: hudDeco(border: on ? th.c : Colors.white30, radius: 12, color: on ? th.c.withOpacity(0.35) : Colors.white10),
           child: Container(
             width: 16, height: 16,
             decoration: BoxDecoration(shape: BoxShape.circle, color: on ? th.c : Colors.white54, boxShadow: on ? [BoxShadow(color: th.c, blurRadius: 6)] : null),
@@ -7174,12 +7275,7 @@ class _FadeToast extends StatelessWidget {
           color: Colors.transparent,
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
-            decoration: BoxDecoration(
-              color: const Color(0xEE202028),
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(color: col),
-              boxShadow: const [BoxShadow(color: Colors.black54, blurRadius: 10)],
-            ),
+            decoration: hudDeco(border: col, radius: 14, color: const Color(0xEE202028)),
             child: Row(mainAxisSize: MainAxisSize.min, children: [
               Icon(Icons.warning_amber_rounded, size: 14, color: col),
               const SizedBox(width: 6),
@@ -8019,7 +8115,7 @@ class _FlashPageState extends State<FlashPage> {
       up = null;
       msg = err;
     });
-    _snack(err ?? 'ส่งไฟล์แล้ว ✓ กดปุ่ม FLASH ที่เกจเพื่อเริ่มแฟลช');
+    _snack(err ?? (_gaugePhoneFlash ? 'ส่งไฟล์แล้ว ✓ กด ⚡ FLASH เพื่อเริ่มแฟลช' : 'ส่งไฟล์แล้ว ✓ กดปุ่ม FLASH ที่เกจเพื่อเริ่มแฟลช'));
   }
 
   // ======================= UI =======================
@@ -8031,6 +8127,7 @@ class _FlashPageState extends State<FlashPage> {
       body: Stack(fit: StackFit.expand, children: [
         Image.asset('assets/bg.jpg', fit: BoxFit.cover),
         Container(color: Colors.black.withOpacity(0.84)),
+        const HudGrid(),
         SafeArea(
           child: Padding(
             padding: const EdgeInsets.fromLTRB(8, 4, 8, 6),
@@ -8047,7 +8144,7 @@ class _FlashPageState extends State<FlashPage> {
                   ),
                   const SizedBox(width: 12),
                   const Expanded(
-                    child: Text('แก้ตารางที่หน้า TUNE💻 แล้วบันทึกเข้าคลัง → เลือกไฟล์ → ส่งไปเกจ → กด FLASH ที่เกจ',
+                    child: Text('แก้ตารางที่หน้า TUNE💻 แล้วบันทึกเข้าคลัง → เลือกไฟล์ → ส่งไปเกจ → กด FLASH',
                         maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 11.5, color: Colors.white54)),
                   ),
                 ]),
@@ -8055,9 +8152,9 @@ class _FlashPageState extends State<FlashPage> {
               const SizedBox(height: 6),
               Expanded(
                 child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-                  Expanded(flex: 4, child: _frame(th, _libPanel(th))),
+                  Expanded(flex: 10, child: _frame(th, _libPanel(th))),
                   const SizedBox(width: 8),
-                  Expanded(flex: 5, child: _frame(th, _flashPanel(th))),
+                  Expanded(flex: 19, child: _frame(th, _flashPanel(th))),
                 ]),
               ),
             ]),
@@ -8069,12 +8166,7 @@ class _FlashPageState extends State<FlashPage> {
 
   Widget _frame(AppTheme th, Widget child) => Container(
         padding: const EdgeInsets.all(10),
-        decoration: BoxDecoration(
-          color: const Color(0xCC060606),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: th.c.withOpacity(0.85), width: 1.1),
-          boxShadow: [BoxShadow(color: th.c.withOpacity(0.3), blurRadius: 10)],
-        ),
+        decoration: hudDeco(border: th.c.withOpacity(0.85), width: 1.1, radius: 12, color: const Color(0xCC060606)),
         child: child,
       );
 
@@ -8084,18 +8176,12 @@ class _FlashPageState extends State<FlashPage> {
       opacity: f == null ? 0.4 : 1,
       child: InkWell(
         onTap: f,
-        borderRadius: BorderRadius.circular(8),
         child: Container(
           padding: EdgeInsets.symmetric(horizontal: 12, vertical: big ? 12 : 7),
-          decoration: BoxDecoration(
-            color: big ? cc.withOpacity(0.25) : Colors.black45,
-            border: Border.all(color: cc, width: 1.4),
-            borderRadius: BorderRadius.circular(8),
-            boxShadow: big && f != null ? [BoxShadow(color: cc.withOpacity(0.45), blurRadius: 12)] : null,
-          ),
+          decoration: hudDeco(border: cc, width: 1.4, radius: 8, color: big ? cc.withOpacity(0.25) : Colors.black45),
           child: Row(mainAxisSize: MainAxisSize.min, mainAxisAlignment: MainAxisAlignment.center, children: [
             if (ic != null) ...[Icon(ic, size: big ? 20 : 16, color: cc), const SizedBox(width: 6)],
-            Text(s, style: TextStyle(fontSize: big ? 15 : 12, fontWeight: FontWeight.bold)),
+            Flexible(child: Text(s, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: big ? 15 : 12, fontWeight: FontWeight.bold))),
           ]),
         ),
       ),
@@ -8103,90 +8189,226 @@ class _FlashPageState extends State<FlashPage> {
   }
 
   Widget _libPanel(AppTheme th) {
-    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-      Row(children: [
-        Text('คลังไฟล์ที่จูนไว้', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: th.c2)),
-        const Spacer(),
-        _btn(th, 'เลือกจากมือถือ', working || (c.t.fl?.busy ?? false) ? null : _pickPhone, ic: Icons.phone_android),
-      ]),
-      if (extName != null)
-        Container(
-          margin: const EdgeInsets.only(top: 6),
-          padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
-          decoration: BoxDecoration(
-            color: th.c.withOpacity(0.2),
-            border: Border.all(color: th.c, width: 1.5),
-            borderRadius: BorderRadius.circular(8),
+    final lock = working || (c.t.fl?.busy ?? false);
+    Widget item({required String name, required String sub, required bool on, required int ck8, VoidCallback? onTap, Widget? menu, IconData ic = Icons.description}) =>
+        InkWell(
+          onTap: onTap,
+          child: Container(
+            margin: const EdgeInsets.only(bottom: 5),
+            padding: const EdgeInsets.fromLTRB(7, 6, 2, 6),
+            decoration: hudDeco(border: on ? th.c : Colors.white12, width: on ? 1.5 : 1, radius: 9, color: on ? th.c.withOpacity(0.2) : Colors.white.withOpacity(0.03)),
+            child: Row(children: [
+              Container(
+                width: 30,
+                height: 30,
+                decoration: BoxDecoration(color: on ? th.c : Colors.white.withOpacity(0.06), borderRadius: BorderRadius.circular(7)),
+                child: Icon(ic, size: 17, color: on ? Colors.white : Colors.white70),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
+                  Text(sub, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 10.5, color: Colors.white54)),
+                ]),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                decoration: BoxDecoration(border: Border.all(color: (ck8 == 0 ? kGreen : kAmber).withOpacity(0.5)), borderRadius: BorderRadius.circular(6)),
+                child: Text(ck8 == 0 ? 'SUM ✓' : 'SUM ${_hx(ck8).substring(2)}', style: TextStyle(fontSize: 9.5, color: ck8 == 0 ? kGreen : kAmber)),
+              ),
+              menu ?? const SizedBox(width: 6),
+            ]),
           ),
+        );
+    return Opacity(
+      opacity: lock ? 0.55 : 1,
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Row(children: [
+          Expanded(child: Text('คลังไฟล์', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: th.c2))),
+          _btn(th, 'เปิด BIN', lock ? null : _pickPhone, ic: Icons.folder_open),
+        ]),
+        const SizedBox(height: 8),
+        if (extName != null)
+          item(
+              name: extName!,
+              sub: '${((data?.length ?? 0) / 1024).toStringAsFixed(1)} KB · จากมือถือ',
+              on: true,
+              ck8: (data ?? Uint8List(0)).fold<int>(0, (a, x) => (a + x) & 0xFF),
+              ic: Icons.phone_android),
+        Expanded(
+          child: lib.items.isEmpty
+              ? const Center(
+                  child: Text('คลังยังว่าง\nบันทึกจากหน้า TUNE💻 (ไฟล์ > บันทึกเข้าคลังไฟล์)\nหรือกด "เปิด BIN" เพื่อแฟลชไฟล์ในเครื่องโดยตรง',
+                      textAlign: TextAlign.center, style: TextStyle(color: Colors.white54, fontSize: 12)))
+              : ListView(children: [
+                  for (final e in lib.items)
+                    item(
+                      name: e.name,
+                      sub: '${(e.size / 1024).toStringAsFixed(0)} KB · ${_dateStr(e.time)}',
+                      on: sel == e,
+                      ck8: e.ck8,
+                      onTap: lock ? null : () => _select(e),
+                      menu: PopupMenuButton<int>(
+                        color: const Color(0xFF16161D),
+                        icon: const Icon(Icons.more_vert, size: 18, color: Colors.white54),
+                        onSelected: (v) => _entryMenu(e, v),
+                        itemBuilder: (_) => const [
+                          PopupMenuItem(value: 1, child: Text('เปลี่ยนชื่อ')),
+                          PopupMenuItem(value: 2, child: Text('ส่งออกไฟล์…')),
+                          PopupMenuItem(value: 3, child: Text('ลบ', style: TextStyle(color: kBad))),
+                        ],
+                      ),
+                    ),
+                ]),
+        ),
+      ]),
+    );
+  }
+
+  // แถวขั้นตอน FILE → SEND → ERASE → WRITE → VERIFY → DONE
+  // ok = จำนวนขั้นที่ผ่านแล้ว, now = ขั้นที่กำลังทำ (-1 = ไม่มี), bad = ขั้นที่ไม่สำเร็จ (-1 = ไม่มี)
+  Widget _steps(AppTheme th, int ok, int now, int bad) {
+    const names = ['FILE', 'SEND', 'ERASE', 'WRITE', 'VERIFY', 'DONE'];
+    Widget dot(int i) {
+      final isOk = i < ok, isNow = i == now, isBad = i == bad;
+      final col = isBad ? kBad : (isNow ? th.c : (isOk ? kGreen : Colors.white24));
+      return SizedBox(
+        width: 48,
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Container(
+            width: 16,
+            height: 16,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: (isNow || isBad) ? col : (isOk ? kGreen.withOpacity(0.2) : const Color(0xFF111111)),
+              border: Border.all(color: col, width: 2),
+              boxShadow: (isOk || isNow || isBad) ? [BoxShadow(color: col.withOpacity(0.7), blurRadius: isNow ? 10 : 6)] : null,
+            ),
+            child: isOk && !isNow && !isBad
+                ? const Icon(Icons.check, size: 10, color: kGreen)
+                : (isBad ? const Icon(Icons.close, size: 10, color: Colors.white) : null),
+          ),
+          const SizedBox(height: 3),
+          Text(names[i], style: TextStyle(fontFamily: kFont, fontSize: 6.5, color: isBad ? kBad : (isNow ? Colors.white : (isOk ? kGreen : Colors.white38)))),
+        ]),
+      );
+    }
+
+    Widget line(int i) {
+      // เส้นก่อนขั้น i
+      final full = i < ok && !(i == now);
+      final toNow = i == now || i == bad;
+      return Expanded(
+        child: Container(
+          height: 2,
+          margin: const EdgeInsets.only(bottom: 12),
+          decoration: BoxDecoration(
+            color: full ? kGreen : (toNow ? null : Colors.white24),
+            gradient: toNow ? LinearGradient(colors: [kGreen, i == bad ? kBad : th.c]) : null,
+            boxShadow: full ? [BoxShadow(color: kGreen.withOpacity(0.6), blurRadius: 4)] : null,
+          ),
+        ),
+      );
+    }
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Row(children: [
+        for (int i = 0; i < 6; i++) ...[if (i > 0) line(i), dot(i)],
+      ]),
+    );
+  }
+
+  Widget _chip(String t, String v, Color dot) => Expanded(
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(8, 5, 8, 5),
+          decoration: hudDeco(border: Colors.white24, width: 1, radius: 9, color: Colors.white.withOpacity(0.03), tick: false),
           child: Row(children: [
-            Icon(Icons.phone_android, size: 20, color: th.c2),
-            const SizedBox(width: 8),
+            Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(shape: BoxShape.circle, color: dot, boxShadow: [BoxShadow(color: dot, blurRadius: 5)]),
+            ),
+            const SizedBox(width: 7),
             Expanded(
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text(extName!, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
-                Text('${((data?.length ?? 0) / 1024).toStringAsFixed(1)} KB · จากมือถือ (ไม่ได้เก็บเข้าคลัง)',
-                    style: const TextStyle(fontSize: 10.5, color: Colors.white54)),
+                Text(t, style: const TextStyle(fontFamily: kFont, fontSize: 7, color: Colors.white54)),
+                Text(v, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
               ]),
             ),
           ]),
         ),
-      const SizedBox(height: 8),
-      Expanded(
-        child: lib.items.isEmpty
-            ? const Center(
-                child: Text('คลังยังว่าง\nบันทึกจากหน้า TUNE💻 (ไฟล์ > บันทึกเข้าคลังไฟล์)\nหรือกด "เลือกจากมือถือ" เพื่อแฟลชไฟล์ในเครื่องโดยตรง',
-                    textAlign: TextAlign.center, style: TextStyle(color: Colors.white54, fontSize: 12.5)))
-            : ListView(children: [
-                for (final e in lib.items)
-                  InkWell(
-                    onTap: working || (c.t.fl?.busy ?? false) ? null : () => _select(e),
-                    borderRadius: BorderRadius.circular(8),
-                    child: Container(
-                      margin: const EdgeInsets.only(bottom: 5),
-                      padding: const EdgeInsets.fromLTRB(8, 6, 2, 6),
-                      decoration: BoxDecoration(
-                        color: sel == e ? th.c.withOpacity(0.2) : Colors.white.withOpacity(0.03),
-                        border: Border.all(color: sel == e ? th.c : Colors.white12, width: sel == e ? 1.5 : 1),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Row(children: [
-                        Icon(Icons.memory, size: 20, color: th.c2),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                            Text(e.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
-                            Text(
-                                '${(e.size / 1024).toStringAsFixed(1)} KB · ${_dateStr(e.time)} · ผลรวม ${_hx(e.ck8)}${e.ck8 == 0 ? ' ✓' : ''}',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(fontSize: 10.5, color: Colors.white54)),
-                          ]),
-                        ),
-                        PopupMenuButton<int>(
-                          color: const Color(0xFF16161D),
-                          icon: const Icon(Icons.more_vert, size: 18, color: Colors.white54),
-                          onSelected: (v) => _entryMenu(e, v),
-                          itemBuilder: (_) => const [
-                            PopupMenuItem(value: 1, child: Text('เปลี่ยนชื่อ')),
-                            PopupMenuItem(value: 2, child: Text('ส่งออกไฟล์…')),
-                            PopupMenuItem(value: 3, child: Text('ลบ', style: TextStyle(color: kBad))),
-                          ],
-                        ),
-                      ]),
-                    ),
-                  ),
-              ]),
-      ),
-    ]);
+      );
+
+  /// เกจรองรับสั่งแฟลชจากมือถือ (FW 1.0.15 ขึ้นไป)
+  bool get _gaugePhoneFlash {
+    final t = c.t;
+    if (t.fwMaj == null) return false;
+    final v = t.fwMaj! * 10000 + t.fwMin! * 100 + t.fwPatch!;
+    return v >= 10015;
   }
 
-  Widget _row(String a, String b, {Color? col}) => Padding(
-        padding: const EdgeInsets.only(bottom: 3),
-        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          SizedBox(width: 92, child: Text(a, style: const TextStyle(fontSize: 12, color: Colors.white54))),
-          Expanded(child: Text(b, style: TextStyle(fontSize: 12.5, color: col ?? Colors.white))),
-        ]),
-      );
+  /// กด ⚡ FLASH บนมือถือ: เช็กลิสต์ + กดค้าง 2 วิ เพื่อยืนยัน
+  Future<void> _phoneFlash(List<(bool, String)> checks, String fileName, String sub) async {
+    final th = Cfg.i.t;
+    final allOk = checks.every((e) => e.$1);
+    final go = await showDialog<bool>(
+      context: context,
+      barrierDismissible: true,
+      barrierColor: Colors.black.withOpacity(0.72),
+      builder: (dctx) => Dialog(
+        backgroundColor: const Color(0xFF0C0708),
+        insetPadding: const EdgeInsets.symmetric(horizontal: 40, vertical: 16),
+        shape: HudBorder(cut: 14, side: BorderSide(color: th.c, width: 1.4)),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 440),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(18, 14, 18, 14),
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text('⚡ เริ่มแฟลช $fileName ?', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 2),
+              Text(sub, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 11.5, color: Colors.white60)),
+              const SizedBox(height: 8),
+              for (final ck in checks)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 2),
+                  child: Row(children: [
+                    Icon(ck.$1 ? Icons.check_circle : Icons.cancel, size: 16, color: ck.$1 ? kGreen : kBad),
+                    const SizedBox(width: 8),
+                    Expanded(child: Text(ck.$2, style: TextStyle(fontSize: 12.5, color: ck.$1 ? Colors.white : kBad))),
+                  ]),
+                ),
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 2),
+                child: Row(children: [
+                  Icon(Icons.error, size: 16, color: kAmber),
+                  SizedBox(width: 8),
+                  Expanded(child: Text('บิดกุญแจ ON ไม่ติดเครื่อง · ห้ามดับ/ถอดสายระหว่างแฟลช', style: TextStyle(fontSize: 12.5, color: kAmber))),
+                ]),
+              ),
+              const SizedBox(height: 12),
+              Row(children: [
+                Expanded(child: _btn(th, 'ยกเลิก', () => Navigator.of(dctx).pop(false), col: Colors.white38)),
+                const SizedBox(width: 10),
+                Expanded(
+                  flex: 3,
+                  child: allOk
+                      ? _HoldButton(color: th.c, label: 'กดค้าง 2 วิ เพื่อ FLASH', onDone: () => Navigator.of(dctx).pop(true))
+                      : Opacity(opacity: 0.4, child: _btn(th, 'ยังเริ่มแฟลชไม่ได้', null, col: kBad)),
+                ),
+              ]),
+            ]),
+          ),
+        ),
+      ),
+    );
+    if (go != true || !mounted) return;
+    final d = data;
+    if (d == null) return;
+    final err = await c.startFlash(d.length, _sum16);
+    if (!mounted) return;
+    _snack(err ?? 'สั่งเริ่มแฟลชแล้ว — ห้ามปิดกุญแจ / ถอดสาย');
+  }
 
   Widget _flashPanel(AppTheme th) {
     final f = c.t.fl;
@@ -8196,123 +8418,299 @@ class _FlashPageState extends State<FlashPage> {
     final idProf = f?.ecm != null ? EcuDb.profile[ecmHex(f!.ecm)] : null; // offset ตาม ID กล่อง
     final plan = d == null ? null : _planOf(d, idProf); // แผนที่เกจจะสรุปจากไฟล์นี้
     final sum16 = d == null ? null : _sum16;
-    final sum8 = (sum16 ?? 0) & 0xFF;
-    // หมายเหตุ: หลังกด FLASH เกจคำนวณ checksum ใหม่ลงไฟล์ในเกจ ผลรวมจึงอาจไม่ตรงกับไฟล์ในแอพอีก
+    // หมายเหตุ: หลังแฟลช เกจคำนวณ checksum ใหม่ลงไฟล์ในเกจ ผลรวมจึงอาจไม่ตรงกับไฟล์ในแอพอีก
     final onGauge = f != null && d != null && f.fileSize == d.length && f.fileSum == sum16;
     final canSend = connected && f != null && f.prep && !busy && f.phase != 2 && !working && d != null && plan != null && plan.ok;
+    final ecuOk = f != null && (f.ecu == 2 || f.ecu == 3 || f.ecu == 5 || f.ecu == 6);
+    final fname = extName ?? (sel != null ? '${sel!.name}.bin' : null);
 
-    String gaugeTxt;
-    Color gaugeCol;
+    // ---- ชิปสถานะ ----
+    String gTxt;
+    Color gCol;
     if (c.demo) {
-      gaugeTxt = 'ปิด DEMO ก่อน แล้วเชื่อมต่อเกจ';
-      gaugeCol = kAmber;
+      gTxt = 'ปิด DEMO ก่อน';
+      gCol = kAmber;
     } else if (!connected) {
-      gaugeTxt = 'ยังไม่ได้เชื่อมต่อเกจ (กดเชื่อมต่อที่หน้าหลัก)';
-      gaugeCol = kBad;
+      gTxt = 'ยังไม่เชื่อมต่อ';
+      gCol = kBad;
     } else if (f == null) {
-      gaugeTxt = 'เฟิร์มแวร์เกจยังไม่รองรับ (ต้อง FW 1.0.10 ขึ้นไป)';
-      gaugeCol = kBad;
+      gTxt = 'FW ไม่รองรับ';
+      gCol = kBad;
     } else if (!f.prep) {
-      gaugeTxt = 'เปิดที่เกจ: SETUP > CONNECT APP > ECU FLASH';
-      gaugeCol = kAmber;
+      gTxt = 'เปิดหน้า ECU FLASH';
+      gCol = kAmber;
+    } else if (busy) {
+      gTxt = 'กำลังแฟลช';
+      gCol = th.c;
     } else {
-      gaugeTxt = 'อยู่หน้าเตรียมแฟลช ✓';
-      gaugeCol = kGreen;
+      gTxt = 'พร้อมแฟลช';
+      gCol = kGreen;
     }
+    final model = f?.ecm != null ? (ecuModelName(f!.ecm) ?? 'ไม่ทราบรุ่น') : '--';
+    final eTxt = f == null || !f.prep ? '--' : '$model · ${switch (f.ecu) { 2 => 'OK', 3 => 'FLASH', 5 || 6 => 'RECOVER', 0 => 'OFF', 1 => 'ไม่ตอบ', _ => '...' }}';
+    final eCol = f == null || !f.prep ? Colors.white24 : (ecuOk ? (f.ecu >= 5 ? kAmber : kGreen) : kBad);
+    final inTxt = f == null || f.fileSize == 0 ? 'ยังไม่มีไฟล์' : (onGauge ? '${fname ?? 'ไฟล์'} ✓' : '${(f.fileSize / 1024).round()} KB (คนละไฟล์)');
+    final inCol = f == null || f.fileSize == 0 ? Colors.white24 : (onGauge ? kGreen : kAmber);
 
-    // ความคืบหน้า (ส่งไฟล์ / แฟลชที่เกจ — แอพดูอย่างเดียว)
-    String phase = '';
+    // ---- ขั้นตอน + ความคืบหน้า ----
+    int ok = (d != null ? 1 : 0) + (onGauge || busy || (f?.phase ?? 0) >= 9 ? 1 : 0);
+    int now = -1, bad = -1;
+    String phTxt = '';
     double? prog;
-    String sizeTxt = '', timeTxt = '';
+    String sizeTxt = '', midTxt = '', timeTxt = '';
+    Color phCol = Colors.white;
     if (up != null) {
-      phase = 'กำลังส่งไฟล์ไปเกจ';
+      ok = d != null ? 1 : 0;
+      now = 1;
+      phTxt = 'กำลังส่งไฟล์ไปเกจ';
       prog = up;
       final n = d?.length ?? 0;
-      sizeTxt = '${(n * up! / 1024).round()}/${(n / 1024).round()} KB';
-    } else if (f != null && f.prep) {
-      phase = flashPhaseText(f.phase);
-      if (busy || f.phase >= 9) {
-        prog = f.phase == 9 ? 1.0 : (f.total > 0 ? f.done / f.total : f.pct / 100);
-        sizeTxt = '${((f.phase == 9 ? f.total : f.done) / 1024).round()}/${(f.total / 1024).round()} KB';
-        timeTxt = _mmss(f.elapsed);
-      }
+      sizeTxt = '${(n * up! / 1024).round()} / ${(n / 1024).round()} KB';
+    } else if (f != null && f.prep && (busy || f.phase >= 9)) {
+      final p = f.phase;
+      if (p >= 4 && p <= 6) now = 2;
+      if (p == 7) now = 3;
+      if (p == 8) now = 4;
+      if (p == 9) ok = 6;
+      if (p == 10) bad = f.done > 0 ? 3 : 2;
+      if (now >= 0) ok = now;
+      if (bad >= 0) ok = bad;
+      phTxt = p == 9 ? 'แฟลชสำเร็จ' : (p == 10 ? 'แฟลชไม่สำเร็จ' : flashPhaseText(p));
+      phCol = p == 9 ? kGreen : (p == 10 ? kBad : Colors.white);
+      prog = p == 9 ? 1.0 : (f.total > 0 ? f.done / f.total : f.pct / 100);
+      sizeTxt = '${((p == 9 ? f.total : f.done) / 1024).round()} / ${(f.total / 1024).round()} KB';
+      timeTxt = _mmss(f.elapsed);
+      midTxt = p == 9 ? 'CHECKSUM OK' : (p == 10 ? (f.err != 0 ? flashErrText(f.err) : '') : (f.eta > 0 ? 'เหลือ ~${_mmss(f.eta)}' : ''));
     }
-    final phaseCol = f?.phase == 9 ? kGreen : (f?.phase == 10 ? kBad : Colors.white);
 
-    String fileTxt = '';
-    Color fileCol = kGreen;
-    if (d != null) {
-      final pl = plan!;
+    // ---- ข้อมูลไฟล์ที่เลือก ----
+    String info = '';
+    Color infoCol = Colors.white70;
+    if (d != null && plan != null) {
+      final pl = plan;
       if (!pl.ok) {
-        fileTxt = '${(d.length / 1024).toStringAsFixed(1)} KB · ${pl.type} — แฟลชไม่ได้: ${pl.why}';
-        fileCol = kAmber;
+        info = '${(d.length / 1024).toStringAsFixed(1)} KB · ${pl.type} — แฟลชไม่ได้: ${pl.why}';
+        infoCol = kAmber;
       } else if (pl.sh) {
-        fileTxt = '${(d.length / 1024).round()} KB · ${pl.type} (Shindengen) → เริ่มเขียนที่ ${_hx(pl.off, 4)}\n'
-            'checksum 32 บิต และ seed/key เกจคำนวณจากไฟล์เองตอนกด FLASH';
-        fileCol = kGreen;
+        info = '${(d.length / 1024).round()} KB · ${pl.type} (Shindengen) · เริ่ม ${_hx(pl.off, 4)} · checksum อัตโนมัติ';
       } else {
-        fileTxt = '${(d.length / 1024).round()} KB · ${pl.type} → Start Offset ${_hx(pl.off, 4)} · checksum ที่ ${_hx(pl.ck, 4)}'
-            ' (${pl.fromId ? 'ตาม ID กล่อง' : 'ตามขนาดไฟล์'})\n'
-            '${sum8 == 0 ? 'checksum ผ่านแล้ว' : 'ผลรวมไบต์ ${_hx(sum8)} — เกจคำนวณ checksum ใหม่ให้ก่อนแฟลช'}';
-        fileCol = kGreen;
+        info = '${(d.length / 1024).round()} KB · ${pl.type} · เริ่ม ${_hx(pl.off, 4)} · '
+            '${(sum16 ?? 0) & 0xFF == 0 ? 'checksum ผ่าน' : 'เกจคำนวณ checksum ให้'}';
       }
     }
 
-    return SingleChildScrollView(
-      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-        Text('สถานะเกจ', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: th.c2)),
-        const SizedBox(height: 4),
-        _row('หน้าเกจ', gaugeTxt, col: gaugeCol),
-        if (f != null && f.prep) ...[
-          _row('กล่อง ECU', '${flashEcuText(f.ecu)}${f.ecm != null ? '  ·  ID ${ecmHex(f.ecm)}' : ''}',
-              col: (f.ecu == 2 || f.ecu == 3) ? kGreen : ((f.ecu == 5 || f.ecu == 6) ? kAmber : Colors.white70)),
-          if (f.ecm != null)
-            _row('รุ่น', ecuModelName(f.ecm) ?? 'ไม่ทราบรุ่น (ID ${ecmHex(f.ecm)})',
-                col: ecuModelName(f.ecm) != null ? th.c2 : Colors.white54),
-          _row('ไฟล์ในเกจ',
-              f.fileSize > 0 ? '${(f.fileSize / 1024).toStringAsFixed(1)} KB · sum ${_hx(f.fileSum, 4)}${onGauge ? ' (ตรงกับไฟล์ที่เลือก)' : ''}' : 'ยังไม่มี'),
-          _row('FLASHCOUNT', f.count == null ? '-- (อ่านได้เมื่อกล่องอยู่สถานะ OK)' : '${f.count}${f.phase == 9 && f.count0 != null && f.count! > f.count0! ? '  (เดิม ${f.count0} → แฟลชเข้ากล่องแล้ว ✓)' : ''}',
-              col: f.count == null ? Colors.white54 : (f.phase == 9 && f.count0 != null && f.count! > f.count0! ? kGreen : Colors.white)),
-          if (f.batt != null) _row('แบต (ล่าสุด)', '${f.batt!.toStringAsFixed(1)} V', col: f.batt! < 12.0 ? kAmber : Colors.white),
-        ],
-        const Divider(color: Colors.white12, height: 16),
-        Text(extName != null ? 'ไฟล์: $extName (จากมือถือ)' : (sel == null ? 'เลือกไฟล์จากคลัง หรือจากมือถือ' : 'ไฟล์: ${sel!.name}'),
-            maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: th.c2)),
-        const SizedBox(height: 6),
-        if (d != null) Text(fileTxt, style: TextStyle(fontSize: 12, color: fileCol, height: 1.35)),
-        const SizedBox(height: 10),
-        _btn(th, onGauge ? 'ส่งไฟล์ไปเกจอีกครั้ง' : 'ส่งไฟล์ไปเกจ', canSend ? _send : null, ic: Icons.send_to_mobile, big: true),
-        const SizedBox(height: 6),
-        const Text(
-            'ส่งไฟล์แล้วกดปุ่ม FLASH ที่หน้าเกจเพื่อเริ่มแฟลช (แอพสั่งแฟลชไม่ได้)\n'
-            'เกจจะไม่ให้กด FLASH ถ้าไม่พบกล่อง ECU · ลบไฟล์ในเกจได้ที่ปุ่ม "ลบไฟล์" บนเกจ',
-            style: TextStyle(fontSize: 11.5, color: Colors.white54, height: 1.35)),
-        const SizedBox(height: 10),
-        if (phase.isNotEmpty) ...[
-          Row(children: [
-            Expanded(child: Text(phase, style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: phaseCol))),
-            if (prog != null) Text('${(prog * 100).round()}%', style: const TextStyle(fontFamily: kFont, fontSize: 13)),
-          ]),
-          const SizedBox(height: 4),
-          ClipRRect(
-            borderRadius: BorderRadius.circular(3),
-            child: LinearProgressIndicator(value: prog, minHeight: 8, color: phaseCol == Colors.white ? th.c : phaseCol, backgroundColor: Colors.white12),
-          ),
-          const SizedBox(height: 4),
-          Row(children: [
-            Text(sizeTxt, style: const TextStyle(fontSize: 12, color: Colors.white70)),
-            const Spacer(),
-            Text(timeTxt, style: const TextStyle(fontSize: 12, color: Colors.white70)),
-          ]),
-        ],
-        if (busy) const Text('เกจกำลังแฟลช — ห้ามปิดกุญแจ / ถอดสาย (ออกจากหน้านี้ได้ เกจแฟลชต่อเอง)', style: TextStyle(fontSize: 12, color: kBad)),
-        if (f != null && f.err != 0) Text('เกจแจ้ง: ${flashErrText(f.err)}', style: const TextStyle(fontSize: 12, color: kBad)),
-        if (msg != null) Text(msg!, style: const TextStyle(fontSize: 12, color: kBad)),
-        if (f != null && f.phase == 9)
-          const Text('แฟลชสำเร็จ — ปิดกุญแจ ~10 วินาทีแล้วเปิดใหม่ ก่อนสตาร์ทเครื่อง', style: TextStyle(fontSize: 12.5, color: kGreen)),
-        if (f != null && (f.phase == 9 || f.phase == 10) && !working)
-          Padding(padding: const EdgeInsets.only(top: 6), child: Align(alignment: Alignment.centerLeft, child: _btn(th, 'ล้างผล', () => c.clearFlash()))),
+    // ---- ปุ่มแฟลชบนมือถือ ----
+    final phoneOk = _gaugePhoneFlash;
+    final canPhone = phoneOk && connected && f != null && f.prep && !busy && f.phase != 2 && !working && onGauge && ecuOk && plan != null && plan.ok;
+    final checks = <(bool, String)>[
+      (connected && f != null && f.prep, 'เกจอยู่หน้าเตรียมแฟลช'),
+      (ecuOk, 'กล่อง ECU ตอบ (${f == null ? '--' : flashEcuText(f.ecu)})'),
+      (onGauge, onGauge ? 'ไฟล์ในเกจตรงกับไฟล์ที่เลือก' : 'ไฟล์ในเกจไม่ตรง — กดส่งไฟล์ไปเกจก่อน'),
+      (f?.batt == null || f!.batt! >= 12.0, 'แบต ${f?.batt == null ? '--' : f!.batt!.toStringAsFixed(1)} V'),
+    ];
+
+    final askSub = '$model · ${f?.ecm != null ? 'ID ${ecmHex(f!.ecm)} · ' : ''}${((d?.length ?? 0) / 1024).round()} KB';
+
+    // ---- ข้อความบรรทัดล่าง ----
+    String note;
+    Color noteCol = Colors.white54;
+    if (busy) {
+      note = '⚠ ห้ามปิดกุญแจ / ถอดสาย — ออกจากหน้านี้ได้ เกจแฟลชต่อเอง';
+      noteCol = const Color(0xFFFF6B6E);
+    } else if (f != null && f.phase == 9) {
+      note = 'ปิดกุญแจ ~10 วินาที แล้วเปิดใหม่ก่อนสตาร์ท'
+          '${f.count != null && f.count0 != null && f.count! > f.count0! ? ' · FLASHCOUNT ${f.count0} → ${f.count}' : ''}';
+      noteCol = kGreen;
+    } else if (f != null && f.phase == 10) {
+      note = 'เช็กแบต / สาย K-Line แล้วสั่ง FLASH อีกครั้ง';
+      noteCol = kAmber;
+    } else if (onGauge) {
+      note = phoneOk ? 'กด ⚡ FLASH บนมือถือ หรือที่หน้าเกจก็ได้ · บิดกุญแจ ON ไม่ต้องสตาร์ท' : 'กดปุ่ม FLASH ที่หน้าเกจ (อัปเดตเกจเป็น FW 1.0.15 เพื่อกดจากมือถือ)';
+    } else {
+      note = 'เลือกไฟล์ แล้วกดส่งไปเกจ';
+    }
+
+    final showProg = phTxt.isNotEmpty;
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      _steps(th, ok, now, bad),
+      const SizedBox(height: 7),
+      Row(children: [
+        _chip('GAUGE', gTxt, gCol),
+        const SizedBox(width: 6),
+        _chip('ECU', eTxt, eCol),
+        const SizedBox(width: 6),
+        _chip('IN GAUGE', inTxt, inCol),
       ]),
-    );
+      const SizedBox(height: 7),
+      Expanded(
+        child: SingleChildScrollView(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            // การ์ดไฟล์ที่เลือก
+            Container(
+              padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+              decoration: hudDeco(border: Colors.white24, width: 1, radius: 10, color: Colors.white.withOpacity(0.03)),
+              child: Row(children: [
+                Container(
+                  width: 38,
+                  height: 38,
+                  decoration: BoxDecoration(color: d != null ? th.c : Colors.white10, borderRadius: BorderRadius.circular(9),
+                      boxShadow: d != null ? [BoxShadow(color: th.c.withOpacity(0.5), blurRadius: 8)] : null),
+                  child: const Icon(Icons.description, color: Colors.white, size: 20),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text(fname ?? 'ยังไม่ได้เลือกไฟล์', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+                    Text(d == null ? 'เลือกจากคลังไฟล์ หรือกด "เปิด BIN"' : info,
+                        maxLines: 2, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 11.5, color: d == null ? Colors.white54 : infoCol)),
+                  ]),
+                ),
+                if (f?.ecm != null) Text('ID ${ecmHex(f!.ecm)}', style: const TextStyle(fontSize: 10.5, color: Colors.white54)),
+              ]),
+            ),
+            const SizedBox(height: 8),
+            if (showProg)
+              Container(
+                padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+                decoration: hudDeco(border: phCol == Colors.white ? Colors.white24 : phCol.withOpacity(0.5), width: 1, radius: 10, color: Colors.white.withOpacity(0.03)),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                  Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                    Expanded(
+                        child: Text('${phCol == kGreen ? '✓ ' : (phCol == kBad ? '✕ ' : '')}$phTxt',
+                            style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: phCol))),
+                    if (prog != null) Text('${(prog * 100).round()}', style: TextStyle(fontFamily: kFont, fontSize: 20, color: phCol)),
+                    if (prog != null) const Text(' %', style: TextStyle(fontFamily: kFont, fontSize: 10, color: Colors.white54)),
+                  ]),
+                  const SizedBox(height: 6),
+                  SizedBox(height: 20, child: CustomPaint(painter: _FlBarPainter(prog ?? 0, fail: phCol == kBad))),
+                  const SizedBox(height: 5),
+                  Row(children: [
+                    Text(sizeTxt, style: const TextStyle(fontSize: 12, color: Colors.white70)),
+                    Expanded(
+                        child: Text(midTxt, textAlign: TextAlign.center, maxLines: 1, overflow: TextOverflow.ellipsis,
+                            style: TextStyle(fontSize: 12, color: phCol == Colors.white ? Colors.white70 : phCol))),
+                    if (timeTxt.isNotEmpty) Text('⏱ $timeTxt', style: const TextStyle(fontSize: 12, color: Colors.white70)),
+                  ]),
+                ]),
+              )
+            else
+              Row(children: [
+                Expanded(child: _btn(th, onGauge ? 'ส่งไฟล์ไปเกจอีกครั้ง' : 'ส่งไฟล์ไปเกจ', canSend ? _send : null, ic: Icons.upload, big: !phoneOk || !onGauge)),
+                if (phoneOk && onGauge) ...[
+                  const SizedBox(width: 8),
+                  Expanded(
+                    flex: 3,
+                    child: Opacity(
+                      opacity: canPhone ? 1 : 0.4,
+                      child: InkWell(
+                        onTap: canPhone
+                            ? () => _phoneFlash(checks, fname ?? 'ไฟล์', askSub)
+                            : null,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          alignment: Alignment.center,
+                          decoration: hudDeco(border: th.c, width: 1.4, radius: 9, gradient: LinearGradient(colors: [Color.lerp(th.c, Colors.black, 0.25)!, th.c])),
+                          child: const Text('⚡ FLASH', style: TextStyle(fontFamily: kFont, fontSize: 15, color: Colors.white, shadows: [Shadow(color: Colors.white54, blurRadius: 6)])),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ]),
+            if (msg != null) Padding(padding: const EdgeInsets.only(top: 6), child: Text(msg!, style: const TextStyle(fontSize: 12, color: kBad))),
+            if (f != null && f.err != 0 && f.phase != 10)
+              Padding(padding: const EdgeInsets.only(top: 6), child: Text('เกจแจ้ง: ${flashErrText(f.err)}', style: const TextStyle(fontSize: 12, color: kBad))),
+          ]),
+        ),
+      ),
+      Text(note, textAlign: TextAlign.center, maxLines: 2, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12, color: noteCol)),
+      if (f != null && (f.phase == 9 || f.phase == 10) && !working)
+        Padding(padding: const EdgeInsets.only(top: 6), child: Center(child: _btn(th, 'ล้างผล', () => c.clearFlash()))),
+    ]);
   }
+}
+
+/// แท่งความคืบหน้าทรงเอียง สีไล่แดง → เขียว (คงที่ ไม่เปลี่ยนตามธีม)
+class _FlBarPainter extends CustomPainter {
+  final double f;
+  final bool fail;
+  _FlBarPainter(this.f, {this.fail = false});
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width, h = size.height, sl = 5.0;
+    Path poly(double x0, double x1) => Path()
+      ..moveTo(x0 + sl, 0)
+      ..lineTo(x1 + sl, 0)
+      ..lineTo(x1, h)
+      ..lineTo(x0, h)
+      ..close();
+    canvas.drawPath(poly(0, w - sl), Paint()..color = const Color(0xFF26262D));
+    final fw = (w - sl) * f.clamp(0.0, 1.0);
+    if (fw <= 0) return;
+    final paint = Paint();
+    if (fail) {
+      paint.color = kBad;
+    } else {
+      paint.shader = const LinearGradient(colors: [Color(0xFFFF2D2D), Color(0xFF2EE66B)]).createShader(Rect.fromLTWH(0, 0, w, h));
+    }
+    canvas.drawPath(poly(0, fw), Paint()
+      ..color = (fail ? kBad : const Color(0xFFFF5A2D)).withOpacity(0.35)
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 5));
+    canvas.drawPath(poly(0, fw), paint);
+  }
+
+  @override
+  bool shouldRepaint(_FlBarPainter o) => o.f != f || o.fail != fail;
+}
+
+/// ปุ่มกดค้างเพื่อยืนยัน (แถบเติมเต็มใน 2 วินาที)
+class _HoldButton extends StatefulWidget {
+  final Color color;
+  final String label;
+  final VoidCallback onDone;
+  const _HoldButton({required this.color, required this.label, required this.onDone});
+  @override
+  State<_HoldButton> createState() => _HoldButtonState();
+}
+
+class _HoldButtonState extends State<_HoldButton> with SingleTickerProviderStateMixin {
+  late final AnimationController ac = AnimationController(vsync: this, duration: const Duration(seconds: 2))
+    ..addListener(() => setState(() {}))
+    ..addStatusListener((s) {
+      if (s == AnimationStatus.completed) {
+        HapticFeedback.heavyImpact();
+        widget.onDone();
+      }
+    });
+
+  @override
+  void dispose() {
+    ac.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => GestureDetector(
+        onTapDown: (_) => ac.forward(),
+        onTapUp: (_) {
+          if (ac.status != AnimationStatus.completed) ac.reverse();
+        },
+        onTapCancel: () {
+          if (ac.status != AnimationStatus.completed) ac.reverse();
+        },
+        child: Container(
+          height: 42,
+          decoration: hudDeco(border: widget.color, width: 1.3, radius: 9, color: widget.color.withOpacity(0.18)),
+          child: Stack(children: [
+            Positioned.fill(
+              child: FractionallySizedBox(
+                alignment: Alignment.centerLeft,
+                widthFactor: ac.value,
+                child: Container(color: widget.color.withOpacity(0.85)),
+              ),
+            ),
+            Center(child: Text(widget.label, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold))),
+          ]),
+        ),
+      );
 }
