@@ -80,6 +80,9 @@ jobs:
           '''
           s = re.sub(r'(<manifest[^>]*>)', r'\1' + perms, s, count=1)
           s = re.sub(r'android:label="[^"]*"', 'android:label="MFB-PRO"', s, count=1)
+          # หมุนจอแนวนอนทั้งสองด้านตามเซนเซอร์ (หมุนได้แม้ปิดหมุนจออัตโนมัติ)
+          s = re.sub(r'android:screenOrientation="[^"]*"\s*', '', s)
+          s = re.sub(r'(<activity\b)', r'\1 android:screenOrientation="sensorLandscape"', s, count=1)
           open(p, "w", encoding="utf-8").write(s)
           PY
 
