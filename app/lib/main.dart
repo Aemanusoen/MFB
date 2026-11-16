@@ -49,7 +49,7 @@ const kThemes = <AppTheme>[
 
 // เวอร์ชันเฟิร์มแวร์ที่แอพรุ่นนี้ออกแบบมาให้ใช้คู่กัน (แสดงเทียบในหน้า SETTING)
 const kAppFw = '1.0.15';
-const kAppVer = '1.4.0'; // เวอร์ชันแอพ (ตรงกับ pubspec.yaml)
+const kAppVer = '1.4.1'; // เวอร์ชันแอพ (ตรงกับ pubspec.yaml)
 
 // ---------- ค่าคีย์ที่แสดงได้ (เหมือน TEST1 + TOP SPD) ----------
 const int kTps = 0, kTemp = 1, kBatt = 2, kAfr = 3, kInj = 4, kIgn = 5, kRpm = 6, kMap = 7,
@@ -9456,9 +9456,10 @@ class _FlashPageState extends State<FlashPage> {
   }
 
   /// กด ⚡ FLASH บนมือถือ: เช็กลิสต์ + กดค้าง 2 วิ เพื่อยืนยัน
-  Future<void> _phoneFlash(List<(bool, String)> checks, String fileName, String sub) async {
+  Future<void> _phoneFlash(List<(bool, String)> checks, String fileName, String sub, {double? batt}) async {
     final th = Cfg.i.t;
     final allOk = checks.every((e) => e.$1);
+    final lowBatt = batt != null && batt < 11.5; // เตือนอย่างเดียว กดแฟลชได้
     final go = await showDialog<bool>(
       context: context,
       barrierDismissible: true,
@@ -9485,6 +9486,21 @@ class _FlashPageState extends State<FlashPage> {
                     Expanded(child: Text(ck.$2, style: TextStyle(fontSize: 12.5, color: ck.$1 ? Colors.white : kBad))),
                   ]),
                 ),
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 2),
+                child: Row(children: [
+                  Icon(lowBatt ? Icons.warning_amber_rounded : (batt == null ? Icons.help_outline : Icons.check_circle),
+                      size: 16, color: lowBatt ? kAmber : (batt == null ? Colors.white38 : kGreen)),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                        lowBatt
+                            ? 'แบต ${batt!.toStringAsFixed(1)} V ต่ำกว่า 11.5 V — แฟลชได้ แต่เสี่ยงแฟลชไม่ผ่าน ควรพ่วงแบต/ชาร์จ'
+                            : 'แบต ${batt == null ? '--' : batt.toStringAsFixed(1)} V',
+                        style: TextStyle(fontSize: 12.5, color: lowBatt ? kAmber : (batt == null ? Colors.white54 : Colors.white))),
+                  ),
+                ]),
+              ),
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 2),
                 child: Row(children: [
@@ -9613,8 +9629,7 @@ class _FlashPageState extends State<FlashPage> {
       (connected && f != null && f.prep, 'เกจอยู่หน้าเตรียมแฟลช'),
       (ecuOk, 'กล่อง ECU ตอบ (${f == null ? '--' : flashEcuText(f.ecu)})'),
       (onGauge, onGauge ? 'ไฟล์ในเกจตรงกับไฟล์ที่เลือก' : 'ไฟล์ในเกจไม่ตรง — กดส่งไฟล์ไปเกจก่อน'),
-      (f?.batt == null || f!.batt! >= 12.0, 'แบต ${f?.batt == null ? '--' : f!.batt!.toStringAsFixed(1)} V'),
-    ];
+    ]; // แบตไม่ใช่เงื่อนไขห้ามแฟลช (1.4.1) — แค่เตือนเมื่อต่ำกว่า 11.5 V
 
     final askSub = '$model · ${f?.ecm != null ? 'ID ${ecmHex(f!.ecm)} · ' : ''}${((d?.length ?? 0) / 1024).round()} KB';
 
@@ -9711,7 +9726,7 @@ class _FlashPageState extends State<FlashPage> {
                       opacity: canPhone ? 1 : 0.4,
                       child: InkWell(
                         onTap: canPhone
-                            ? () => _phoneFlash(checks, fname ?? 'ไฟล์', askSub)
+                            ? () => _phoneFlash(checks, fname ?? 'ไฟล์', askSub, batt: f?.batt)
                             : null,
                         child: Container(
                           padding: const EdgeInsets.symmetric(vertical: 12),
