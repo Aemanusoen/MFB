@@ -49,7 +49,7 @@ const kThemes = <AppTheme>[
 
 // เวอร์ชันเฟิร์มแวร์ที่แอพรุ่นนี้ออกแบบมาให้ใช้คู่กัน (แสดงเทียบในหน้า SETTING)
 const kAppFw = '1.0.15';
-const kAppVer = '1.4.1'; // เวอร์ชันแอพ (ตรงกับ pubspec.yaml)
+const kAppVer = '1.4.2'; // เวอร์ชันแอพ (ตรงกับ pubspec.yaml)
 
 // ---------- ค่าคีย์ที่แสดงได้ (เหมือน TEST1 + TOP SPD) ----------
 const int kTps = 0, kTemp = 1, kBatt = 2, kAfr = 3, kInj = 4, kIgn = 5, kRpm = 6, kMap = 7,
@@ -434,7 +434,7 @@ class HudGrid extends StatelessWidget {
   final Color? color;
   const HudGrid({super.key, this.color});
   @override
-  Widget build(BuildContext context) => IgnorePointer(child: CustomPaint(painter: _HudGridPainter(color ?? Cfg.i.t.c), size: Size.infinite));
+  Widget build(BuildContext context) => IgnorePointer(child: RepaintBoundary(child: CustomPaint(painter: _HudGridPainter(color ?? Cfg.i.t.c), size: Size.infinite)));
 }
 
 class _HudGridPainter extends CustomPainter {
@@ -458,22 +458,34 @@ class _HudGridPainter extends CustomPainter {
 }
 
 /// ตัวเลขไหลนุ่ม ๆ: ครั้งแรกนับขึ้นจาก 0, ค่าถัดไปไหลจากค่าเดิม (ข้อความที่ไม่ใช่ตัวเลขแสดงตรง ๆ)
-class RollNum extends StatelessWidget {
+class RollNum extends StatefulWidget {
   final String text;
   final TextStyle style;
   const RollNum(this.text, {super.key, required this.style});
+  @override
+  State<RollNum> createState() => _RollNumState();
+}
+
+class _RollNumState extends State<RollNum> with SingleTickerProviderStateMixin {
   static final _num = RegExp(r'^-?\d+(\.\d+)?$');
+  late final AnimationController ac = AnimationController(vsync: this, duration: const Duration(milliseconds: 450))..forward();
+  @override
+  void dispose() {
+    ac.dispose();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
-    final t = text.trim();
-    if (!_num.hasMatch(t)) return Text(text, style: style);
+    final t = widget.text.trim();
+    if (!ac.isAnimating || !_num.hasMatch(t)) return Text(widget.text, style: widget.style);
     final v = double.parse(t);
     final dec = t.contains('.') ? t.split('.')[1].length : 0;
-    return TweenAnimationBuilder<double>(
-      tween: Tween<double>(begin: 0, end: v),
-      duration: const Duration(milliseconds: 300),
-      curve: Curves.easeOutCubic,
-      builder: (_, x, __) => Text(x.toStringAsFixed(dec), style: style),
+    return AnimatedBuilder(
+      animation: ac,
+      builder: (_, __) => ac.isAnimating
+          ? Text((v * Curves.easeOutCubic.transform(ac.value)).toStringAsFixed(dec), style: widget.style)
+          : Text(widget.text, style: widget.style),
     );
   }
 }
@@ -1636,7 +1648,7 @@ class _HomePageState extends State<HomePage> {
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(fit: StackFit.expand, children: [
-        Image.asset('assets/bg.jpg', fit: BoxFit.cover),
+        RepaintBoundary(child: Image.asset('assets/bg.jpg', fit: BoxFit.cover)),
         Container(color: Colors.black.withOpacity(0.55)),
         const HudGrid(),
         SafeArea(
@@ -1730,7 +1742,7 @@ class _GaugePageState extends State<GaugePage> with SingleTickerProviderStateMix
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(fit: StackFit.expand, children: [
-        Image.asset('assets/bg.jpg', fit: BoxFit.cover),
+        RepaintBoundary(child: Image.asset('assets/bg.jpg', fit: BoxFit.cover)),
         Container(color: Colors.black.withOpacity(0.55)),
         const HudGrid(),
         SafeArea(
@@ -1757,15 +1769,7 @@ class _GaugePageState extends State<GaugePage> with SingleTickerProviderStateMix
                       setState(() => page = i);
                     },
                     children: [
-                      for (int i = 0; i < pages.length; i++)
-                        AnimatedBuilder(
-                          animation: pc,
-                          builder: (_, child) {
-                            final pg = pc.hasClients && pc.position.haveDimensions ? (pc.page ?? page.toDouble()) : page.toDouble();
-                            return Opacity(opacity: (1 - (pg - i).abs() * 0.75).clamp(0.0, 1.0).toDouble(), child: child);
-                          },
-                          child: pages[i],
-                        ),
+                      for (final p in pages) RepaintBoundary(child: p),
                     ],
                   ),
                 ),
@@ -2478,7 +2482,7 @@ class _GaugePageState extends State<GaugePage> with SingleTickerProviderStateMix
 
     return Stack(children: [
       Positioned.fill(
-        child: AnimatedBuilder(
+        child: RepaintBoundary(child: AnimatedBuilder(
           animation: sweep,
           builder: (_, __) => sweep.isAnimating
               ? CustomPaint(painter: GaugePainter(frac: _sweepFrac, r: r, th: th, shift: cfg.shift))
@@ -2487,7 +2491,7 @@ class _GaugePageState extends State<GaugePage> with SingleTickerProviderStateMix
                   duration: const Duration(milliseconds: 300),
                   builder: (_, v, __) => CustomPaint(painter: GaugePainter(frac: v, r: r, th: th, shift: cfg.shift)),
                 ),
-        ),
+        )),
       ),
       Positioned(
         left: cx - r * 0.5, width: r, top: cy - r * 0.34, height: r * 0.72,
@@ -2710,7 +2714,8 @@ class StatTile extends StatelessWidget {
     final col = active ? kBad : th.c;
     final vcol = alert ? kBad : (valueColor ?? Colors.white);
     final glow = alert ? kBad : (valueColor ?? th.c);
-    return GestureDetector(
+    return RepaintBoundary(
+     child: GestureDetector(
       onTap: onTap,
       child: Padding(
        padding: EdgeInsets.only(bottom: bottomMargin),
@@ -2778,6 +2783,7 @@ class StatTile extends StatelessWidget {
        ),
        ),
       ),
+     ),
     );
   }
 }
@@ -3342,7 +3348,7 @@ class _SettingsPageState extends State<SettingsPage> {
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(fit: StackFit.expand, children: [
-        Image.asset('assets/bg.jpg', fit: BoxFit.cover),
+        RepaintBoundary(child: Image.asset('assets/bg.jpg', fit: BoxFit.cover)),
         Container(color: Colors.black.withOpacity(0.7)),
         const HudGrid(),
         SafeArea(
@@ -4990,7 +4996,7 @@ class _AfrTunePageState extends State<AfrTunePage> {
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(fit: StackFit.expand, children: [
-        Image.asset('assets/bg.jpg', fit: BoxFit.cover),
+        RepaintBoundary(child: Image.asset('assets/bg.jpg', fit: BoxFit.cover)),
         Container(color: Colors.black.withOpacity(0.84)),
         const HudGrid(),
         SafeArea(
@@ -5377,7 +5383,8 @@ class _TunePageState extends State<TunePage> {
 
   // มุมมอง
   bool view3d = false, live = true;
-  bool showPct = false; // โหมด Δ% เทียบไฟล์อ้างอิง
+  bool showPct = false; // โหมดเทียบไฟล์อ้างอิง
+  bool cmpReal = false; // ในโหมดเทียบ: false = Δ%, true = ค่าจริงของไฟล์ที่เทียบ
   int stepMul = 1;
   double yaw = -0.85, pitch = 0.62, zoom = 1, _zoom0 = 1;
   Offset pan3 = Offset.zero, _pan0 = Offset.zero, _mid0 = Offset.zero; // 2 นิ้วลาก = เลื่อนกราฟ 3D
@@ -5926,6 +5933,16 @@ class _TunePageState extends State<TunePage> {
 
   void _copy() {
     final t = s.table;
+    if (t != null && showPct && s.cmpRef != null) {
+      final (r0, c0, r1, c1) = _sel ?? (0, 0, t.rows - 1, t.cols - 1);
+      _clip = [
+        for (int r = r0; r <= r1; r++) [for (int c = c0; c <= c1; c++) s.refVal(t, r, c) ?? double.nan],
+      ];
+      _clipFrom = '${t.title} (${s.cmpName})';
+      setState(() {});
+      _snack('คัดลอก ${r1 - r0 + 1}×${c1 - c0 + 1} ช่องจากไฟล์เทียบ ${s.cmpName} แล้ว — เลือกช่องมุมซ้ายบนแล้วกด PASTE');
+      return;
+    }
     final g = _sel;
     if (t == null || g == null || !_needSel()) return;
     final (r0, c0, r1, c1) = g;
@@ -6804,7 +6821,7 @@ class _TunePageState extends State<TunePage> {
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(fit: StackFit.expand, children: [
-        Image.asset('assets/bg.jpg', fit: BoxFit.cover),
+        RepaintBoundary(child: Image.asset('assets/bg.jpg', fit: BoxFit.cover)),
         Container(color: Colors.black.withOpacity(0.84)),
         const HudGrid(),
         SafeArea(
@@ -6818,11 +6835,11 @@ class _TunePageState extends State<TunePage> {
                   Expanded(
                     child: Text(
                         showPct && s.cmpName != null
-                            ? 'BIN: ${s.binName ?? '-'}  ·  เทียบกับ: ${s.cmpName}  (แตะค้าง Δ% เพื่อเปลี่ยน)'
+                            ? '${cmpReal ? 'ค่าจริงของ' : 'Δ% เทียบกับ'}: ${s.cmpName}  ·  แตะ ${cmpReal ? 'REF = ปิด' : 'Δ% = ดูค่าจริง'} · แตะค้าง = เปลี่ยนไฟล์'
                             : 'BIN: ${s.binName ?? '-'}     XDF: ${s.xdfName ?? '-'}',
                         maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 10.5, color: showPct ? kGreen : Colors.white54)),
                   ),
-                  if (s.ready && t != null && t.valid) Text(showPct && s.cmpRef != null ? _pctInfo(t) : _selInfo(t), style: const TextStyle(fontSize: 10.5, color: Colors.white60)),
+                  if (s.ready && t != null && t.valid) Text(showPct && s.cmpRef != null && !cmpReal ? _pctInfo(t) : _selInfo(t), style: const TextStyle(fontSize: 10.5, color: Colors.white60)),
                 ]),
               ),
               const SizedBox(height: 2),
@@ -6922,14 +6939,16 @@ class _TunePageState extends State<TunePage> {
               _tb(th, Icon(Icons.undo, size: 18, color: th.c), s.undoList.isNotEmpty ? _undo : null),
               _tb(th, Icon(Icons.redo, size: 18, color: th.c), s.redoList.isNotEmpty ? _redo : null),
               _sep(),
-              _tb(th, const Text('COPY', style: TextStyle(fontFamily: kFont, fontSize: 10.5)), can && _sel != null ? _copy : null),
+              _tb(th, const Text('COPY', style: TextStyle(fontFamily: kFont, fontSize: 10.5)), can && (_sel != null || (showPct && s.cmpRef != null)) ? _copy : null),
               _tb(th, const Text('PASTE', style: TextStyle(fontFamily: kFont, fontSize: 10.5)), can && _clip != null ? _paste : null),
               _tb(th, const Text('AFR', style: TextStyle(fontFamily: kFont, fontSize: 10.5, color: kGreen)), _openAfr, col: kGreen),
               _tb(th, const Text('AFR→จูน', style: TextStyle(fontSize: 11.5, color: kGreen)), can ? _afrTune : null, col: kGreen),
               GestureDetector(
                 onLongPress: can ? _pickCmp : null, // แตะค้าง = เปลี่ยนไฟล์ที่เทียบ
-                child: _tb(th, const Text('Δ%', style: TextStyle(fontFamily: kFont, fontSize: 11)), can ? _togglePct : null, active: showPct),
+                child: _tb(th, Text(showPct && cmpReal ? 'REF' : 'Δ%', style: const TextStyle(fontFamily: kFont, fontSize: 11)), can ? _togglePct : null, active: showPct),
               ),
+              if (showPct && s.cmpRef != null)
+                _tb(th, const Text('ใช้ค่าเทียบ', style: TextStyle(fontSize: 11.5, color: kAmber)), can ? _useRef : null, col: kAmber),
               _sep(),
               _tb(
                 th,
@@ -6972,8 +6991,15 @@ class _TunePageState extends State<TunePage> {
 
   // ---- Δ% เทียบไฟล์อ้างอิง ----
   Future<void> _togglePct() async {
+    if (showPct && !cmpReal) {
+      setState(() => cmpReal = true); // Δ% -> ค่าจริงของไฟล์เทียบ
+      return;
+    }
     if (showPct) {
-      setState(() => showPct = false);
+      setState(() {
+        showPct = false;
+        cmpReal = false;
+      });
       return;
     }
     if (s.cmpRef == null && !await _autoCmp()) {
@@ -7065,6 +7091,29 @@ class _TunePageState extends State<TunePage> {
     } catch (e) {
       _snack('เปิดไฟล์ที่ใช้เทียบไม่ได้: $e');
     }
+  }
+
+  /// เอาค่าจากไฟล์ที่เทียบมาใส่ตารางปัจจุบัน: ช่องที่เลือก หรือทั้งตารางถ้าไม่ได้เลือก (ย้อนกลับได้)
+  Future<void> _useRef() async {
+    final t = s.table;
+    if (t == null || s.cmpRef == null) return;
+    final (r0, c0, r1, c1) = _sel ?? (0, 0, t.rows - 1, t.cols - 1);
+    final out = <(int, int), double>{};
+    for (int r = r0; r <= r1; r++) {
+      for (int c = c0; c <= c1; c++) {
+        final o = s.refVal(t, r, c);
+        if (o != null && (o - s.val(t, r, c)).abs() > 1e-9) out[(r, c)] = o;
+      }
+    }
+    if (out.isEmpty) {
+      _toast('ค่าเท่ากับไฟล์เทียบอยู่แล้ว', col: kGreen);
+      return;
+    }
+    final all = _sel == null;
+    if (!await _confirm('ใช้ค่าจากไฟล์เทียบ', '${all ? 'ทั้งตาราง' : 'ช่องที่เลือก'} ${t.title}\nเปลี่ยน ${out.length} ช่อง ตามค่าใน ${s.cmpName}', ok: 'ใช้ค่า')) return;
+    if (!await _canEdit(t)) return;
+    final n = _w(t, out, 'ใช้ค่าจาก ${s.cmpName}');
+    _snack('ใส่ค่าจากไฟล์เทียบแล้ว $n ช่อง — ย้อนกลับ (↶) ได้');
   }
 
   /// สรุป Δ% ของตารางที่เปิดอยู่
@@ -7447,7 +7496,7 @@ class _TunePageState extends State<TunePage> {
                 painter: _GridPainter(
                   s: s, t: t, v: v, lo: lo, hi: hi, rowL: rowL, colL: colL,
                   sx: sx, sy: sy, cw: cw, ch: ch, hw: hw, hh: hh,
-                  sel: _sel, lr: lp.$1, lc: lp.$2, th: th, rev: s.rev, pct: showPct && s.cmpRef != null,
+                  sel: _sel, lr: lp.$1, lc: lp.$2, th: th, rev: s.rev, cmp: showPct && s.cmpRef != null ? (cmpReal ? 2 : 1) : 0,
                 ),
               ),
             ),
@@ -7645,12 +7694,12 @@ class _GridPainter extends CustomPainter {
   final double? lr, lc;
   final AppTheme th;
   final int rev;
-  final bool pct; // แสดง Δ% เทียบไฟล์อ้างอิง
+  final int cmp; // 0 = ปกติ, 1 = Δ% เทียบไฟล์อ้างอิง, 2 = ค่าจริงของไฟล์อ้างอิง
   _GridPainter({
     required this.s, required this.t, required this.v, required this.lo, required this.hi,
     required this.rowL, required this.colL, required this.sx, required this.sy,
     required this.cw, required this.ch, required this.hw, required this.hh,
-    required this.sel, required this.lr, required this.lc, required this.th, required this.rev, this.pct = false,
+    required this.sel, required this.lr, required this.lc, required this.th, required this.rev, this.cmp = 0,
   });
 
   @override
@@ -7677,7 +7726,18 @@ class _GridPainter extends CustomPainter {
       for (int c = c0; c <= c1; c++) {
         final rect = Rect.fromLTWH(cx(c), cy(r), cw, ch);
         final x = v[r][c];
-        if (pct) {
+        if (cmp == 2) {
+          // ค่าจริงของไฟล์เทียบ: สีตามช่วงเดียวกับตารางปัจจุบัน, ช่องที่ต่างจากไฟล์ปัจจุบันมีมุมขาว
+          final o = s.refVal(t, r, c);
+          fill.color = o == null ? const Color(0xFF121216) : _heat(hi > lo ? ((o - lo) / span).clamp(0.0, 1.0).toDouble() : 0.5);
+          final rr = rect.deflate(cw > 16 ? 0.5 : 0.2);
+          canvas.drawRect(rr, fill);
+          if (o != null && (o - x).abs() > 1e-9) {
+            final k = math.min(7.0, math.min(cw, ch) * 0.35);
+            canvas.drawPath(Path()..moveTo(rr.right - k, rr.top)..lineTo(rr.right, rr.top)..lineTo(rr.right, rr.top + k)..close(), Paint()..color = Colors.white);
+          }
+          if (showTxt) _TP.center(canvas, _TP.get(o == null ? '·' : t.fmt(o), fs, o == null ? Colors.white38 : const Color(0xFF000000), maxW: cw), rect.center);
+        } else if (cmp == 1) {
           // Δ%: เทาเมื่อเท่าเดิม, แดง = เพิ่ม, ฟ้า = ลด (เข้มตามขนาด เต็มที่ 8%)
           final d = s.pctDiff(t, r, c);
           Color col;
@@ -8874,7 +8934,7 @@ class _CustomerPageState extends State<CustomerPage> {
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(fit: StackFit.expand, children: [
-        Image.asset('assets/bg.jpg', fit: BoxFit.cover),
+        RepaintBoundary(child: Image.asset('assets/bg.jpg', fit: BoxFit.cover)),
         Container(color: Colors.black.withOpacity(0.84)),
         const HudGrid(),
         SafeArea(
@@ -9232,7 +9292,7 @@ class _FlashPageState extends State<FlashPage> {
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(fit: StackFit.expand, children: [
-        Image.asset('assets/bg.jpg', fit: BoxFit.cover),
+        RepaintBoundary(child: Image.asset('assets/bg.jpg', fit: BoxFit.cover)),
         Container(color: Colors.black.withOpacity(0.84)),
         const HudGrid(),
         SafeArea(
