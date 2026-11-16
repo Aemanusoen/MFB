@@ -47,7 +47,7 @@
 
 #define FW_VER_MAJ     1        // เวอร์ชันเฟิร์มแวร์ (ส่งให้แอพแสดงในหน้า SETTING, ไบต์ 72..74 ของแพ็กเก็ต DATA)
 #define FW_VER_MIN     0
-#define FW_VER_PATCH   14
+#define FW_VER_PATCH   15
 #define BLE_NAME       "MFB-PRO"
 // ชื่อ BLE ไม่ซ้ำกันระหว่างเกจ: "MFB-PRO-" + 2 ไบต์ท้ายของ MAC ชิป (ไม่ต้องตั้งเอง ไม่หายตอนแฟลช FW)
 static char bleNameBuf[20] = "";
@@ -251,6 +251,16 @@ class BleCmdCb : public NimBLECharacteristicCallbacks {
     } else if (cmd == 3 && v.size() >= 3) {          // GPS speed จากแอพ: [3][u16 km/h x10 LE] (0xFFFF = ไม่มีสัญญาณ)
       uint16_t sp = (uint8_t)v[1] | ((uint16_t)(uint8_t)v[2] << 8);
       gpsKmh = (sp == 0xFFFF) ? NAN : sp / 10.0f; gpsMs = millis();
+    } else if (cmd == 0x13 && v.size() >= 7) {         // เริ่มแฟลชจากแอพ: [0x13][u32 ขนาดไฟล์ LE][u16 ผลรวมไบต์ LE]
+      // เริ่มเฉพาะเมื่อไฟล์ในเกจตรงกับที่แอพยืนยัน และเงื่อนไขเดียวกับกดปุ่ม FLASH บนเกจทุกข้อ
+      const uint32_t sz = (uint8_t)v[1] | ((uint32_t)(uint8_t)v[2] << 8) | ((uint32_t)(uint8_t)v[3] << 16) | ((uint32_t)(uint8_t)v[4] << 24);
+      const uint16_t sm = (uint8_t)v[5] | ((uint16_t)(uint8_t)v[6] << 8);
+      const uint8_t es = fEcu;
+      const bool ecuOk = es == ES_OK || es == ES_FLASH || es == ES_RECOVER_OLD || es == ES_RECOVER_NEW;
+      if (fPrepOn && fFileOk && fPlanOk && !fBusy() && fPhase != FP_RECV && !fStartReq && !fDelReq && ecuOk &&
+          sz == fFileSize && sm == fFileSum) {
+        fErr = FE_NONE; fStartReq = true;                // kTask (ecuFlashPrep) เริ่มแฟลช
+      }
     } else if (cmd == 0x12) {                          // ล้างผลแฟลชครั้งก่อน
       if (fPrepOn && !fBusy() && fPhase != FP_RECV) { fErr = FE_NONE; fPct = 0; fDone = 0; fTotal = 0; fElapsedMs = 0; fEtaMs = 0; fPhase = fFileOk ? FP_READY : FP_PREP; }
     } else if (cmd == 2 && v.size() >= 2) {
