@@ -48,8 +48,8 @@ const kThemes = <AppTheme>[
 ];
 
 // เวอร์ชันเฟิร์มแวร์ที่แอพรุ่นนี้ออกแบบมาให้ใช้คู่กัน (แสดงเทียบในหน้า SETTING)
-const kAppFw = '1.0.15';
-const kAppVer = '1.4.2'; // เวอร์ชันแอพ (ตรงกับ pubspec.yaml)
+const kAppFw = '1.0.20';
+const kAppVer = '1.4.3'; // เวอร์ชันแอพ (ตรงกับ pubspec.yaml)
 
 // ---------- ค่าคีย์ที่แสดงได้ (เหมือน TEST1 + TOP SPD) ----------
 const int kTps = 0, kTemp = 1, kBatt = 2, kAfr = 3, kInj = 4, kIgn = 5, kRpm = 6, kMap = 7,
@@ -1055,7 +1055,7 @@ class GaugeController extends ChangeNotifier {
       _dev = dev;
       await dev.connect(timeout: const Duration(seconds: 10));
       try {
-        await dev.requestMtu(185);
+        await dev.requestMtu(247); // FW 1.0.20 รับ 247 (เดิม 185) -> ชิ้นละ 244 ไบต์
       } catch (_) {}
       final services = await dev.discoverServices();
       final svc = services.firstWhere((s) => s.uuid == kSvc);
@@ -1171,6 +1171,50 @@ class GaugeController extends ChangeNotifier {
     }
   }
 
+  /// เกจ FW 1.0.20 ขึ้นไป: รับชิ้นละ 244 ไบต์ + เขียนแบบไม่รอตอบ (ส่งไฟล์/โลโก้เร็วขึ้นหลายเท่า)
+  bool get _fastXfer {
+    final f = t;
+    if (f.fwMaj == null) return false;
+    return f.fwMaj! * 10000 + f.fwMin! * 100 + f.fwPatch! >= 10020 && (_imgCh?.properties.writeWithoutResponse ?? false);
+  }
+
+  /// ขอช่วงเชื่อมต่อถี่สุดระหว่างส่งไฟล์ (Android) แล้วคืนค่าปกติตอนจบ
+  Future<void> _prio(bool high) async {
+    if (!io.Platform.isAndroid || _dev == null) return;
+    try {
+      await _dev!.requestConnectionPriority(connectionPriorityRequest: high ? ConnectionPriority.high : ConnectionPriority.balanced);
+    } catch (_) {}
+  }
+
+  /// ส่งข้อมูลเป็นชิ้น [type][data...] : แบบเร็ว = ไม่รอตอบ ยกเว้นทุกชิ้นที่ 8 (กันคิวในเกจล้น), แบบเดิม = รอตอบทุกชิ้น
+  /// คืน sum16 ของข้อมูลทั้งหมด หรือ null ถ้าถูกยกเลิก (check คืนข้อความ error)
+  Future<int?> _sendChunks(BluetoothCharacteristic ch, int type, Uint8List data, void Function(double) onProgress, {String? Function()? check}) async {
+    final fast = _fastXfer;
+    final chunk = fast ? (_dev!.mtuNow - 4).clamp(16, 244).toInt() : (_dev!.mtuNow - 4).clamp(16, 200).toInt();
+    final n = data.length;
+    int sum = 0, k = 0;
+    double lastP = -1;
+    for (int off = 0; off < n; off += chunk) {
+      final end = math.min(n, off + chunk);
+      final part = data.sublist(off, end);
+      for (final b in part) {
+        sum = (sum + b) & 0xFFFF;
+      }
+      final nr = fast && (++k % 8 != 0) && end < n;
+      await ch.write([type, ...part], withoutResponse: nr);
+      final p = end / n;
+      if (p - lastP >= 0.01 || end >= n) {
+        lastP = p;
+        onProgress(p); // อัปเดตหน้าจอทุก 1% (เดิมทุกชิ้น = หน้าจอวาดใหม่หลายร้อยครั้ง)
+      }
+      if (check != null && (k % 8 == 0)) {
+        final e = check();
+        if (e != null) throw e;
+      }
+    }
+    return sum;
+  }
+
   /// ส่งโลโก้ 320x240 RGB565 (153600 ไบต์) ไปเก็บในบอร์ด คืนค่า null = สำเร็จ, ข้อความ = error
   Future<String?> sendLogo(Uint8List data, void Function(double) onProgress) async {
     final ch = _imgCh;
@@ -1178,20 +1222,11 @@ class GaugeController extends ChangeNotifier {
       return 'ยังไม่ได้เชื่อมต่อบอร์ด หรือเฟิร์มแวร์ยังไม่รองรับการส่งโลโก้';
     }
     _logoBusy = true;
+    await _prio(true);
     try {
-      final chunk = (_dev!.mtuNow - 4).clamp(16, 200).toInt();
       final n = data.length;
       await ch.write([1, n & 255, (n >> 8) & 255, (n >> 16) & 255, (n >> 24) & 255]);
-      int sum = 0;
-      for (int off = 0; off < n; off += chunk) {
-        final end = math.min(n, off + chunk);
-        final part = data.sublist(off, end);
-        for (final b in part) {
-          sum = (sum + b) & 0xFFFF;
-        }
-        await ch.write([2, ...part]);
-        onProgress(end / n);
-      }
+      final sum = (await _sendChunks(ch, 2, data, onProgress, check: () => link != LinkState.connected ? 'การเชื่อมต่อหลุดระหว่างส่ง' : (t.img == 3 ? 'บอร์ดรับภาพไม่สำเร็จ' : null)))!;
       await ch.write([3, sum & 255, (sum >> 8) & 255]);
       for (int i = 0; i < 40; i++) {
         await Future.delayed(const Duration(milliseconds: 100));
@@ -1200,9 +1235,10 @@ class GaugeController extends ChangeNotifier {
       }
       return 'ไม่ได้รับการยืนยันจากบอร์ด';
     } catch (e) {
-      return 'ส่งไม่สำเร็จ: $e';
+      return e is String ? e : 'ส่งไม่สำเร็จ: $e';
     } finally {
       _logoBusy = false;
+      await _prio(false);
     }
   }
 
@@ -1214,8 +1250,8 @@ class GaugeController extends ChangeNotifier {
     if (f0 == null) return 'เฟิร์มแวร์เกจยังไม่รองรับการแฟลช (ต้อง FW 1.0.10 ขึ้นไป)';
     if (!f0.prep) return 'เกจยังไม่อยู่หน้าเตรียมแฟลช';
     _logoBusy = true;
+    await _prio(true);
     try {
-      final chunk = (_dev!.mtuNow - 4).clamp(16, 200).toInt();
       final n = data.length;
       // offset override ตาม ID กล่อง: แนบ marker 0x00 + start u32 + checksum u32 (เกจจะใช้แทน by-size)
       final over = (startOff != null && ckOff != null);
@@ -1232,21 +1268,14 @@ class GaugeController extends ChangeNotifier {
       } else {
         await ch.write([0x21, n & 255, (n >> 8) & 255, (n >> 16) & 255, (n >> 24) & 255, ...nm]);
       }
-      int sum = 0;
       bool sawRecv = false;
-      for (int off = 0; off < n; off += chunk) {
-        final end = math.min(n, off + chunk);
-        final part = data.sublist(off, end);
-        for (final b in part) {
-          sum = (sum + b) & 0xFFFF;
-        }
-        await ch.write([0x22, ...part]);
-        onProgress(end / n);
+      final sum = (await _sendChunks(ch, 0x22, data, onProgress, check: () {
         final f = t.fl;
         if (f != null && f.phase == 2) sawRecv = true;
         if (sawRecv && f != null && f.phase != 2 && f.err != 0) return 'เกจรับไฟล์ไม่สำเร็จ: ${flashErrText(f.err)}';
         if (link != LinkState.connected) return 'การเชื่อมต่อหลุดระหว่างส่งไฟล์';
-      }
+        return null;
+      }))!;
       await ch.write([0x23, sum & 255, (sum >> 8) & 255]);
       for (int i = 0; i < 60; i++) {
         await Future.delayed(const Duration(milliseconds: 100));
@@ -1256,9 +1285,10 @@ class GaugeController extends ChangeNotifier {
       }
       return 'ไม่ได้รับการยืนยันจากเกจ';
     } catch (e) {
-      return 'ส่งไม่สำเร็จ: $e';
+      return e is String ? e : 'ส่งไม่สำเร็จ: $e';
     } finally {
       _logoBusy = false;
+      await _prio(false);
     }
   }
 
