@@ -49,7 +49,7 @@ const kThemes = <AppTheme>[
 
 // เวอร์ชันเฟิร์มแวร์ที่แอพรุ่นนี้ออกแบบมาให้ใช้คู่กัน (แสดงเทียบในหน้า SETTING)
 const kAppFw = '1.0.15';
-const kAppVer = '1.3.0'; // เวอร์ชันแอพ (ตรงกับ pubspec.yaml)
+const kAppVer = '1.4.0'; // เวอร์ชันแอพ (ตรงกับ pubspec.yaml)
 
 // ---------- ค่าคีย์ที่แสดงได้ (เหมือน TEST1 + TOP SPD) ----------
 const int kTps = 0, kTemp = 1, kBatt = 2, kAfr = 3, kInj = 4, kIgn = 5, kRpm = 6, kMap = 7,
@@ -456,6 +456,100 @@ class _HudGridPainter extends CustomPainter {
   @override
   bool shouldRepaint(_HudGridPainter o) => o.c != c;
 }
+
+/// ตัวเลขไหลนุ่ม ๆ: ครั้งแรกนับขึ้นจาก 0, ค่าถัดไปไหลจากค่าเดิม (ข้อความที่ไม่ใช่ตัวเลขแสดงตรง ๆ)
+class RollNum extends StatelessWidget {
+  final String text;
+  final TextStyle style;
+  const RollNum(this.text, {super.key, required this.style});
+  static final _num = RegExp(r'^-?\d+(\.\d+)?$');
+  @override
+  Widget build(BuildContext context) {
+    final t = text.trim();
+    if (!_num.hasMatch(t)) return Text(text, style: style);
+    final v = double.parse(t);
+    final dec = t.contains('.') ? t.split('.')[1].length : 0;
+    return TweenAnimationBuilder<double>(
+      tween: Tween<double>(begin: 0, end: v),
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOutCubic,
+      builder: (_, x, __) => Text(x.toStringAsFixed(dec), style: style),
+    );
+  }
+}
+
+/// แตะแล้วขอบกรอบ HUD วาบแสงสั้น ๆ
+class TapFlash extends StatefulWidget {
+  final Widget child;
+  final double cut;
+  final bool enabled;
+  const TapFlash({super.key, required this.child, this.cut = 11, this.enabled = true});
+  @override
+  State<TapFlash> createState() => _TapFlashState();
+}
+
+class _TapFlashState extends State<TapFlash> with SingleTickerProviderStateMixin {
+  late final AnimationController ac = AnimationController(vsync: this, duration: const Duration(milliseconds: 420));
+  @override
+  void dispose() {
+    ac.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!widget.enabled) return widget.child;
+    return Listener(
+      onPointerDown: (_) => ac.forward(from: 0),
+      child: Stack(children: [
+        widget.child,
+        Positioned.fill(
+          child: IgnorePointer(
+            child: AnimatedBuilder(
+              animation: ac,
+              builder: (_, __) => ac.value == 0 || ac.value == 1 ? const SizedBox.shrink() : CustomPaint(painter: _FlashPainter(1 - ac.value, widget.cut)),
+            ),
+          ),
+        ),
+      ]),
+    );
+  }
+}
+
+class _FlashPainter extends CustomPainter {
+  final double a, cut;
+  _FlashPainter(this.a, this.cut);
+  @override
+  void paint(Canvas canvas, Size size) {
+    final p = HudBorder(cut: cut).getOuterPath(Rect.fromLTWH(1, 1, size.width - 2, size.height - 2));
+    canvas.drawPath(p, Paint()
+      ..color = const Color(0xFFCFE0FF).withOpacity(0.55 * a)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 6
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6));
+    canvas.drawPath(p, Paint()
+      ..color = Colors.white.withOpacity(0.9 * a)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.6);
+  }
+
+  @override
+  bool shouldRepaint(_FlashPainter o) => o.a != a;
+}
+
+/// เปลี่ยนหน้าแบบสไลด์ + จางเข้า
+Route<T> hudRoute<T>(Widget page) => PageRouteBuilder<T>(
+      transitionDuration: const Duration(milliseconds: 340),
+      reverseTransitionDuration: const Duration(milliseconds: 260),
+      pageBuilder: (_, __, ___) => page,
+      transitionsBuilder: (_, a, __, child) {
+        final cv = CurvedAnimation(parent: a, curve: Curves.easeOutCubic, reverseCurve: Curves.easeInCubic);
+        return FadeTransition(
+          opacity: cv,
+          child: SlideTransition(position: Tween<Offset>(begin: const Offset(0.08, 0), end: Offset.zero).animate(cv), child: child),
+        );
+      },
+    );
 
 /// เส้นสแกนจาง ๆ ในช่องค่า
 class _ScanPainter extends CustomPainter {
@@ -1326,7 +1420,8 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Cfg.i.load();
   await EcuDb.load(); // ฐานข้อมูล ID กล่อง -> รุ่น / offset (assets/ecm_database.json)
-  SystemChrome.setPreferredOrientations([DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]);
+  // แนวนอนทั้งสองด้าน หมุนตามเซนเซอร์ (ตั้ง android:screenOrientation="sensorLandscape" ใน workflow)
+  // ไม่เรียก setPreferredOrientations เพราะ Flutter จะตั้งเป็น USER_LANDSCAPE ซึ่งไม่หมุนเมื่อปิดหมุนจออัตโนมัติ
   SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
   runApp(const MfbProApp());
 }
@@ -1505,7 +1600,7 @@ class _HomePageState extends State<HomePage> {
     super.dispose();
   }
 
-  void _open(Widget page) => Navigator.of(context).push(MaterialPageRoute(builder: (_) => page));
+  void _open(Widget page) => Navigator.of(context).push(hudRoute(page));
 
   Widget _card(AppTheme th, IconData ic, String name, String desc, String sub, VoidCallback f) => Expanded(
         child: GestureDetector(
@@ -1562,6 +1657,8 @@ class _HomePageState extends State<HomePage> {
                   _card(th, Icons.tune, 'TUNE', 'จูนตาราง XDF / BIN · คลังไฟล์', 'MAP EDITOR', () => _open(TunePage(c: c))),
                   const SizedBox(width: 14),
                   _card(th, Icons.bolt, 'FLASH', 'แฟลชกล่อง ECU ผ่านเกจ', 'KEIHIN · SHINDENGEN', () => _open(FlashPage(c: c))),
+                  const SizedBox(width: 14),
+                  _card(th, Icons.menu_book, 'CUSTOMER', 'สมุดลูกค้า · ประวัติแฟลช', 'BOOK', () => _open(CustomerPage(c: c))),
                 ]),
               ),
               const SizedBox(height: 6),
@@ -1585,8 +1682,17 @@ class GaugePage extends StatefulWidget {
   State<GaugePage> createState() => _GaugePageState();
 }
 
-class _GaugePageState extends State<GaugePage> {
+class _GaugePageState extends State<GaugePage> with SingleTickerProviderStateMixin {
   GaugeController get c => widget.c;
+  // เปิดหน้า: เข็มกวาด 0 → สุด → 0 (~1.7 วิ) แล้ววิ่งตามค่าจริง
+  late final AnimationController sweep = AnimationController(vsync: this, duration: const Duration(milliseconds: 1700))..forward();
+  double get _sweepFrac {
+    final t = sweep.value;
+    if (t < 0.12) return 0;
+    if (t < 0.52) return Curves.easeInOutCubic.transform((t - 0.12) / 0.40);
+    return 1 - Curves.easeInOutCubic.transform((t - 0.52) / 0.48);
+  }
+
   final pc = PageController();
   int page = 0;
   Size _afrSz = Size.zero;
@@ -1608,6 +1714,7 @@ class _GaugePageState extends State<GaugePage> {
     c.removeListener(_rebuild);
     c.graphVisible = false;
     c.dtcWatch(false); // ออกจากหน้า GAUGE: หยุดให้เกจอ่าน DTC
+    sweep.dispose();
     pc.dispose();
     super.dispose();
   }
@@ -1619,6 +1726,7 @@ class _GaugePageState extends State<GaugePage> {
     final t = c.t;
     final blinkOn = (DateTime.now().millisecondsSinceEpoch ~/ 280) % 2 == 0;
     final shiftOn = t.rpm != null && t.rpm! >= cfg.shift;
+    final pages = [_mainPage(th, blinkOn), _gridPage(th, blinkOn), _graphPage(th), _afrPage(th), _dragPage(th), _dtcPage(th)];
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(fit: StackFit.expand, children: [
@@ -1648,7 +1756,17 @@ class _GaugePageState extends State<GaugePage> {
                       c.dtcWatch(i == 5); // หน้า DTC: ให้เกจอ่านโค้ดต่อเนื่อง
                       setState(() => page = i);
                     },
-                    children: [_mainPage(th, blinkOn), _gridPage(th, blinkOn), _graphPage(th), _afrPage(th), _dragPage(th), _dtcPage(th)],
+                    children: [
+                      for (int i = 0; i < pages.length; i++)
+                        AnimatedBuilder(
+                          animation: pc,
+                          builder: (_, child) {
+                            final pg = pc.hasClients && pc.position.haveDimensions ? (pc.page ?? page.toDouble()) : page.toDouble();
+                            return Opacity(opacity: (1 - (pg - i).abs() * 0.75).clamp(0.0, 1.0).toDouble(), child: child);
+                          },
+                          child: pages[i],
+                        ),
+                    ],
                   ),
                 ),
               ),
@@ -2360,10 +2478,15 @@ class _GaugePageState extends State<GaugePage> {
 
     return Stack(children: [
       Positioned.fill(
-        child: TweenAnimationBuilder<double>(
-          tween: Tween<double>(end: frac),
-          duration: const Duration(milliseconds: 140),
-          builder: (_, v, __) => CustomPaint(painter: GaugePainter(frac: v, r: r, th: th, shift: cfg.shift)),
+        child: AnimatedBuilder(
+          animation: sweep,
+          builder: (_, __) => sweep.isAnimating
+              ? CustomPaint(painter: GaugePainter(frac: _sweepFrac, r: r, th: th, shift: cfg.shift))
+              : TweenAnimationBuilder<double>(
+                  tween: Tween<double>(begin: 0, end: frac),
+                  duration: const Duration(milliseconds: 300),
+                  builder: (_, v, __) => CustomPaint(painter: GaugePainter(frac: v, r: r, th: th, shift: cfg.shift)),
+                ),
         ),
       ),
       Positioned(
@@ -2375,7 +2498,7 @@ class _GaugePageState extends State<GaugePage> {
             Expanded(
               child: FittedBox(
                 fit: BoxFit.scaleDown,
-                child: Text(sp == null ? '--' : sp.toStringAsFixed(0),
+                child: RollNum(sp == null ? '--' : sp.toStringAsFixed(0),
                     style: TextStyle(
                         fontFamily: kFont, fontSize: 60, color: Colors.white,
                         shadows: [Shadow(color: th.c, blurRadius: 14), Shadow(color: th.c.withOpacity(0.7), blurRadius: 4)])),
@@ -2589,8 +2712,11 @@ class StatTile extends StatelessWidget {
     final glow = alert ? kBad : (valueColor ?? th.c);
     return GestureDetector(
       onTap: onTap,
-      child: Container(
-        margin: EdgeInsets.only(bottom: bottomMargin),
+      child: Padding(
+       padding: EdgeInsets.only(bottom: bottomMargin),
+       child: TapFlash(
+        enabled: onTap != null,
+        child: Container(
         decoration: ShapeDecoration(
           gradient: const LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Color(0xF50D1018), Color(0xF5050507)]),
           shape: HudBorder(cut: 11, side: BorderSide(color: col.withOpacity(active ? 1.0 : 0.9), width: active ? 2.0 : 1.2), tick: false),
@@ -2624,7 +2750,7 @@ class StatTile extends StatelessWidget {
                 child: Center(
                   child: FittedBox(
                     fit: BoxFit.scaleDown,
-                    child: Text(value,
+                    child: RollNum(value,
                         style: TextStyle(
                             fontFamily: kFont, fontSize: valueSize, color: vcol,
                             shadows: [Shadow(color: glow, blurRadius: 9), Shadow(color: glow.withOpacity(0.6), blurRadius: 3)])),
@@ -2649,6 +2775,8 @@ class StatTile extends StatelessWidget {
             ]),
           ),
         ]),
+       ),
+       ),
       ),
     );
   }
@@ -3789,6 +3917,8 @@ class TuneSession extends ChangeNotifier {
 
   void loadBin(String name, Uint8List b, {int src = 2}) {
     binSrc = src;
+    cmpRef = null; // ไฟล์ใหม่: เลือกไฟล์ที่ใช้เทียบ Δ% ใหม่
+    cmpName = null;
     saved = Uint8List.fromList(b);
     orig = Uint8List.fromList(b);
     bin = Uint8List.fromList(b);
@@ -3953,6 +4083,34 @@ class TuneSession extends ChangeNotifier {
   }
 
   bool cellChanged(XdfTable t, int r, int c) => _rangeChanged(t.z.addrOf(r, c), t.z.bytes);
+
+  // ---- เทียบ Δ% กับไฟล์อ้างอิง (ORIGINAL ในแอป / ไฟล์ในคลัง / ไฟล์ตอนเปิด) ----
+  Uint8List? cmpRef;
+  String? cmpName;
+  void setCmp(String name, Uint8List b) {
+    cmpRef = Uint8List.fromList(b);
+    cmpName = name;
+    _changed();
+  }
+
+  /// ค่าในไฟล์อ้างอิง (null = ไม่มีไฟล์อ้างอิง / ตำแหน่งเกินขนาดไฟล์)
+  double? refVal(XdfTable t, int r, int c) {
+    final ref = cmpRef;
+    if (ref == null) return null;
+    final a = t.z.addrOf(r, c);
+    if (a < 0 || a + t.z.bytes > ref.length) return null;
+    return t.eq.f(rawAt(ref, t.z, a).toDouble());
+  }
+
+  /// เปลี่ยนจากไฟล์อ้างอิงกี่ % (null = เทียบไม่ได้)
+  double? pctDiff(XdfTable t, int r, int c) {
+    final o = refVal(t, r, c);
+    if (o == null) return null;
+    final v = val(t, r, c);
+    if ((v - o).abs() < 1e-9) return 0;
+    if (o.abs() < 1e-9) return null;
+    return (v - o) / o.abs() * 100;
+  }
 
   /// ตารางนี้มีค่าที่ยังไม่ได้บันทึกเข้าคลัง (เทียบกับตอนบันทึกล่าสุด / ตอนเปิดไฟล์)
   bool tableUnsaved(XdfTable t) {
@@ -4739,6 +4897,242 @@ Color _afrColor(double v) {
   return Color.lerp(stops[k], stops[k + 1], p - k)!;
 }
 
+// ---------- AFR → จูนอัตโนมัติ: คำนวณ % น้ำมันที่ควรปรับต่อช่องจาก AFR LOG ----------
+class AfrTunePage extends StatefulWidget {
+  final TuneSession s;
+  final XdfTable t;
+  const AfrTunePage({super.key, required this.s, required this.t});
+  @override
+  State<AfrTunePage> createState() => _AfrTunePageState();
+}
+
+class _AfrTunePageState extends State<AfrTunePage> {
+  static double target = 13.2, targetWot = 12.8, wotTps = 60, maxPct = 10, strength = 0.5;
+  static int minCnt = 20;
+
+  TuneSession get s => widget.s;
+  XdfTable get t => widget.t;
+
+  /// % ที่ควรปรับต่อช่อง (null = ข้อมูลไม่พอ) : + = เพิ่มน้ำมัน (AFR บาง), − = ลด (AFR หนา)
+  List<List<double?>> _calc() {
+    final lg = AfrLog.i;
+    final ys = s.axisNums(t, false)!, xs = s.axisNums(t, true)!;
+    final rpmOnRows = _axisKind(ys) == 1;
+    return [
+      for (int r = 0; r < t.rows; r++)
+        [
+          for (int c = 0; c < t.cols; c++)
+            () {
+              final rpm = rpmOnRows ? ys[r] : xs[c], tps = rpmOnRows ? xs[c] : ys[r];
+              if (rpm.isNaN || tps.isNaN) return null;
+              final fr = _axisFrac(lg.rpm, rpm), fc = _axisFrac(lg.tps, tps);
+              if (fr == null || fc == null) return null;
+              final lr = fr.round().clamp(0, lg.rows - 1).toInt(), lc = fc.round().clamp(0, lg.cols - 1).toInt();
+              if (lg.cnt[lr][lc] < minCnt) return null;
+              final afr = lg.at(lr, lc);
+              if (afr == null) return null;
+              final tg = tps >= wotTps ? targetWot : target;
+              final p = ((afr / tg - 1) * 100 * strength).clamp(-maxPct, maxPct).toDouble();
+              return (p * 10).round() / 10;
+            }(),
+        ],
+    ];
+  }
+
+  Future<void> _edit(String title, double v, double step, double lo, double hi, void Function(double) set, {int dec = 1}) async {
+    final ctl = TextEditingController(text: v.toStringAsFixed(dec));
+    final r = await showDialog<double>(
+      context: context,
+      builder: (d) => AlertDialog(
+        backgroundColor: const Color(0xFF14141A),
+        title: Text(title, style: const TextStyle(fontSize: 15)),
+        content: TextField(controller: ctl, autofocus: true, keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true)),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(d).pop(), child: const Text('ยกเลิก')),
+          TextButton(onPressed: () => Navigator.of(d).pop(double.tryParse(ctl.text.trim())), child: const Text('ตกลง')),
+        ],
+      ),
+    );
+    if (r != null) setState(() => set(r.clamp(lo, hi).toDouble()));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final th = Cfg.i.t;
+    final p = _calc();
+    int n = 0;
+    double sum = 0;
+    final out = <(int, int), double>{};
+    for (int r = 0; r < t.rows; r++) {
+      for (int c = 0; c < t.cols; c++) {
+        final v = p[r][c];
+        if (v == null || v == 0) continue;
+        n++;
+        sum += v;
+        out[(r, c)] = s.val(t, r, c) * (1 + v / 100);
+      }
+    }
+    Widget opt(String a, String b, String sub, VoidCallback f) => InkWell(
+          onTap: f,
+          child: Container(
+            margin: const EdgeInsets.only(bottom: 6),
+            padding: const EdgeInsets.fromLTRB(9, 5, 9, 5),
+            decoration: hudDeco(border: Colors.white24, width: 1, radius: 8, color: Colors.white.withOpacity(0.03), tick: false),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                Expanded(child: Text(a, style: const TextStyle(fontSize: 11.5, color: Colors.white70))),
+                Text(b, style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.bold)),
+              ]),
+              Text(sub, style: const TextStyle(fontSize: 9.5, color: Colors.white38)),
+            ]),
+          ),
+        );
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Stack(fit: StackFit.expand, children: [
+        Image.asset('assets/bg.jpg', fit: BoxFit.cover),
+        Container(color: Colors.black.withOpacity(0.84)),
+        const HudGrid(),
+        SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(8, 4, 8, 6),
+            child: Column(children: [
+              SizedBox(
+                height: 32,
+                child: Row(children: [
+                  InkWell(
+                    onTap: () => Navigator.of(context).pop(),
+                    child: Row(children: [
+                      Icon(Icons.chevron_left, color: th.c, size: 26),
+                      Text('AFR AUTO-TUNE', style: TextStyle(fontFamily: kFont, fontSize: 13, color: th.c, shadows: [Shadow(color: th.c, blurRadius: 8)])),
+                    ]),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                      child: Text('ตาราง: ${t.title}', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12, color: Colors.white70))),
+                ]),
+              ),
+              const SizedBox(height: 4),
+              Expanded(
+                child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                  Expanded(
+                    child: Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: hudDeco(border: th.c.withOpacity(0.85), width: 1.1, radius: 12, color: const Color(0xCC060606)),
+                      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                        Row(children: [
+                          Expanded(
+                              child: Text('น้ำมันที่ควรปรับ (%) · AFR LOG ${AfrLog.i.filled} ช่อง',
+                                  style: const TextStyle(fontSize: 10.5, color: Colors.white54))),
+                          const Text('■ เพิ่มน้ำมัน (บาง)  ', style: TextStyle(fontSize: 10, color: Color(0xFFFF7A5A))),
+                          const Text('■ ลดน้ำมัน (หนา)', style: TextStyle(fontSize: 10, color: Color(0xFF5AA0FF))),
+                        ]),
+                        const SizedBox(height: 4),
+                        Expanded(child: CustomPaint(size: Size.infinite, painter: _PctGridPainter(p, s.axisNums(t, false)!, s.axisNums(t, true)!))),
+                      ]),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Container(
+                    width: 214,
+                    padding: const EdgeInsets.all(8),
+                    decoration: hudDeco(border: th.c.withOpacity(0.85), width: 1.1, radius: 12, color: const Color(0xCC060606)),
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                      Expanded(
+                        child: SingleChildScrollView(
+                          child: Column(children: [
+                            opt('AFR เป้าหมาย', target.toStringAsFixed(1), 'ช่วงปกติ (TPS < ${wotTps.round()}%)',
+                                () => _edit('AFR เป้าหมาย', target, 0.1, 10, 16, (v) => target = v)),
+                            opt('AFR ช่วงเร่ง', targetWot.toStringAsFixed(1), 'TPS ≥ ${wotTps.round()}%',
+                                () => _edit('AFR ช่วงเร่ง', targetWot, 0.1, 10, 16, (v) => targetWot = v)),
+                            opt('เริ่มช่วงเร่งที่ TPS', '${wotTps.round()} %', 'ตั้ง 100 = ใช้เป้าหมายเดียวทั้งตาราง',
+                                () => _edit('TPS ช่วงเร่ง (%)', wotTps, 1, 0, 100, (v) => wotTps = v, dec: 0)),
+                            opt('ข้อมูลขั้นต่ำ/ช่อง', '$minCnt ครั้ง', 'ช่องที่ข้อมูลน้อยกว่านี้ข้าม (·)',
+                                () => _edit('ข้อมูลขั้นต่ำ/ช่อง', minCnt.toDouble(), 1, 1, 1000, (v) => minCnt = v.round(), dec: 0)),
+                            opt('ปรับสูงสุด', '± ${maxPct.toStringAsFixed(0)} %', 'กันค่ากระโดด',
+                                () => _edit('ปรับสูงสุด (%)', maxPct, 1, 1, 50, (v) => maxPct = v, dec: 0)),
+                            opt('ความแรง', strength.toStringAsFixed(2), '1 = ปรับเต็ม %, 0.5 = ครึ่งเดียว',
+                                () => _edit('ความแรง (0.05 – 1)', strength, 0.05, 0.05, 1, (v) => strength = v, dec: 2)),
+                          ]),
+                        ),
+                      ),
+                      Text.rich(TextSpan(style: const TextStyle(fontSize: 11, color: Colors.white70), children: [
+                        const TextSpan(text: 'จะแก้ '),
+                        TextSpan(text: '$n', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                        const TextSpan(text: ' ช่อง · เฉลี่ย '),
+                        TextSpan(
+                            text: n == 0 ? '-' : '${sum / n > 0 ? '+' : ''}${(sum / n).toStringAsFixed(1)}%',
+                            style: TextStyle(color: n == 0 ? Colors.white54 : (sum > 0 ? const Color(0xFFFF7A5A) : const Color(0xFF5AA0FF)), fontWeight: FontWeight.bold)),
+                      ])),
+                      const SizedBox(height: 6),
+                      Opacity(
+                        opacity: n == 0 ? 0.4 : 1,
+                        child: InkWell(
+                          onTap: n == 0 ? null : () => Navigator.of(context).pop(out),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(vertical: 11),
+                            alignment: Alignment.center,
+                            decoration: hudDeco(border: th.c, width: 1.4, radius: 9, color: th.c.withOpacity(0.35)),
+                            child: Text('✓ ใส่ลงตาราง', style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.bold)),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      const Text('แก้แล้วย้อนกลับ (↶) ได้ · ยังไม่แฟลช', textAlign: TextAlign.center, style: TextStyle(fontSize: 9.5, color: Colors.white38)),
+                    ]),
+                  ),
+                ]),
+              ),
+            ]),
+          ),
+        ),
+      ]),
+    );
+  }
+}
+
+/// ตาราง % (ใช้ในหน้า AFR AUTO-TUNE)
+class _PctGridPainter extends CustomPainter {
+  final List<List<double?>> p;
+  final List<double> ys, xs;
+  _PctGridPainter(this.p, this.ys, this.xs);
+  @override
+  void paint(Canvas canvas, Size size) {
+    final nr = p.length, nc = nr == 0 ? 0 : p[0].length;
+    if (nr == 0 || nc == 0) return;
+    const hw = 40.0, hh = 16.0;
+    final cw = (size.width - hw) / nc, ch = (size.height - hh) / nr;
+    final fs = math.min(math.min(ch * 0.62, cw * 0.3), 11.0);
+    String ax(double v) => v.isNaN ? '' : (v.abs() >= 100 ? v.round().toString() : v.toStringAsFixed(v == v.roundToDouble() ? 0 : 1));
+    canvas.drawRect(Rect.fromLTWH(0, 0, size.width, hh), Paint()..color = const Color(0xFF1A1A20));
+    canvas.drawRect(Rect.fromLTWH(0, 0, hw, size.height), Paint()..color = const Color(0xFF1A1A20));
+    for (int c = 0; c < nc; c++) {
+      if (fs >= 4) _TP.center(canvas, _TP.get(ax(c < xs.length ? xs[c] : double.nan), math.min(fs, 9.0), Colors.white60, maxW: cw), Offset(hw + (c + 0.5) * cw, hh / 2));
+    }
+    for (int r = 0; r < nr; r++) {
+      _TP.center(canvas, _TP.get(ax(r < ys.length ? ys[r] : double.nan), math.min(math.max(fs, 6.0), 9.0), Colors.white60, maxW: hw), Offset(hw / 2, hh + (r + 0.5) * ch));
+      for (int c = 0; c < nc; c++) {
+        final v = p[r][c];
+        final rect = Rect.fromLTWH(hw + c * cw, hh + r * ch, cw, ch).deflate(0.5);
+        Color col;
+        if (v == null) {
+          col = const Color(0xFF121216);
+        } else {
+          final k = (v.abs() / 8).clamp(0.0, 1.0).toDouble();
+          col = v > 0 ? Color.lerp(const Color(0xFF28282F), const Color(0xFFFF5A3C), k)! : Color.lerp(const Color(0xFF28282F), const Color(0xFF3C96FF), k)!;
+        }
+        canvas.drawRect(rect, Paint()..color = col);
+        if (fs >= 4) {
+          _TP.center(canvas, _TP.get(v == null ? '·' : '${v > 0 ? '+' : ''}${v.toStringAsFixed(1)}', fs, v == null ? Colors.white24 : Colors.white, maxW: cw), rect.center);
+        }
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_PctGridPainter o) => true;
+}
+
 class AfrLogPage extends StatefulWidget {
   final GaugeController c;
   const AfrLogPage({super.key, required this.c});
@@ -4954,7 +5348,8 @@ class _AfrPainter extends CustomPainter {
 // ---------- หน้า TUNE ----------
 class TunePage extends StatefulWidget {
   final GaugeController c;
-  const TunePage({super.key, required this.c});
+  final BinEntry? initial; // เปิดหน้ามาพร้อมไฟล์จากคลัง (จากสมุดลูกค้า)
+  const TunePage({super.key, required this.c, this.initial});
   @override
   State<TunePage> createState() => _TunePageState();
 }
@@ -4982,6 +5377,7 @@ class _TunePageState extends State<TunePage> {
 
   // มุมมอง
   bool view3d = false, live = true;
+  bool showPct = false; // โหมด Δ% เทียบไฟล์อ้างอิง
   int stepMul = 1;
   double yaw = -0.85, pitch = 0.62, zoom = 1, _zoom0 = 1;
   Offset pan3 = Offset.zero, _pan0 = Offset.zero, _mid0 = Offset.zero; // 2 นิ้วลาก = เลื่อนกราฟ 3D
@@ -5020,6 +5416,14 @@ class _TunePageState extends State<TunePage> {
     c.addListener(_onLive);
     AfrLog.i.attach(c);
     _syncAfr();
+    final e = widget.initial;
+    if (e != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        if (!mounted) return;
+        if (_hasEdits && !await _confirm('เปิด ${e.name}', 'ค่าที่แก้ใน BIN ปัจจุบันจะหายไป', ok: 'เปิดไฟล์')) return;
+        await _openEntry(e);
+      });
+    }
   }
 
   @override
@@ -5982,6 +6386,10 @@ class _TunePageState extends State<TunePage> {
     if (!mounted) return;
     final e = await pickFromLibrary(context);
     if (e == null) return;
+    await _openEntry(e);
+  }
+
+  Future<void> _openEntry(BinEntry e) async {
     try {
       final b = await BinLib.i.read(e);
       s.loadBin('${e.name}.bin', b);
@@ -6408,10 +6816,13 @@ class _TunePageState extends State<TunePage> {
                 height: 17,
                 child: Row(children: [
                   Expanded(
-                    child: Text('BIN: ${s.binName ?? '-'}     XDF: ${s.xdfName ?? '-'}',
-                        maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 10.5, color: Colors.white54)),
+                    child: Text(
+                        showPct && s.cmpName != null
+                            ? 'BIN: ${s.binName ?? '-'}  ·  เทียบกับ: ${s.cmpName}  (แตะค้าง Δ% เพื่อเปลี่ยน)'
+                            : 'BIN: ${s.binName ?? '-'}     XDF: ${s.xdfName ?? '-'}',
+                        maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 10.5, color: showPct ? kGreen : Colors.white54)),
                   ),
-                  if (s.ready && t != null && t.valid) Text(_selInfo(t), style: const TextStyle(fontSize: 10.5, color: Colors.white60)),
+                  if (s.ready && t != null && t.valid) Text(showPct && s.cmpRef != null ? _pctInfo(t) : _selInfo(t), style: const TextStyle(fontSize: 10.5, color: Colors.white60)),
                 ]),
               ),
               const SizedBox(height: 2),
@@ -6514,6 +6925,11 @@ class _TunePageState extends State<TunePage> {
               _tb(th, const Text('COPY', style: TextStyle(fontFamily: kFont, fontSize: 10.5)), can && _sel != null ? _copy : null),
               _tb(th, const Text('PASTE', style: TextStyle(fontFamily: kFont, fontSize: 10.5)), can && _clip != null ? _paste : null),
               _tb(th, const Text('AFR', style: TextStyle(fontFamily: kFont, fontSize: 10.5, color: kGreen)), _openAfr, col: kGreen),
+              _tb(th, const Text('AFR→จูน', style: TextStyle(fontSize: 11.5, color: kGreen)), can ? _afrTune : null, col: kGreen),
+              GestureDetector(
+                onLongPress: can ? _pickCmp : null, // แตะค้าง = เปลี่ยนไฟล์ที่เทียบ
+                child: _tb(th, const Text('Δ%', style: TextStyle(fontFamily: kFont, fontSize: 11)), can ? _togglePct : null, active: showPct),
+              ),
               _sep(),
               _tb(
                 th,
@@ -6554,10 +6970,152 @@ class _TunePageState extends State<TunePage> {
     );
   }
 
+  // ---- Δ% เทียบไฟล์อ้างอิง ----
+  Future<void> _togglePct() async {
+    if (showPct) {
+      setState(() => showPct = false);
+      return;
+    }
+    if (s.cmpRef == null && !await _autoCmp()) {
+      await _pickCmp();
+      if (s.cmpRef == null) return;
+    }
+    if (mounted) setState(() => showPct = true);
+  }
+
+  /// เลือกไฟล์ ORIGINAL ในแอปให้อัตโนมัติ: ตรง ID กล่อง > ชื่อ XDF ตรงกัน > ชื่อ BIN ตรงกัน
+  Future<bool> _autoCmp() async {
+    final ecm = c.t.fl?.ecm;
+    OrigPack? p;
+    for (final o in kOriginals) {
+      if (o.matches(ecm)) p ??= o;
+    }
+    for (final o in kOriginals) {
+      if (o.xdfName == s.xdfName) p ??= o;
+    }
+    for (final o in kOriginals) {
+      if (o.binName == s.binName) p ??= o;
+    }
+    if (p == null) return false;
+    try {
+      final b = (await rootBundle.load(p.bin)).buffer.asUint8List();
+      s.setCmp('${p.binName} (ORIGINAL ในแอป)', b);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// เลือกไฟล์ที่ใช้เทียบ: ORIGINAL ในแอป / ไฟล์ในคลัง / ไฟล์ตอนเปิด
+  Future<void> _pickCmp() async {
+    final th = Cfg.i.t;
+    await BinLib.i.load();
+    if (!mounted) return;
+    final pick = await showDialog<(String, Future<Uint8List?> Function())>(
+      context: context,
+      barrierDismissible: true,
+      builder: (dctx) {
+        Widget item(String t, String sub, (String, Future<Uint8List?> Function()) v) => InkWell(
+              onTap: () => Navigator.of(dctx).pop(v),
+              child: Container(
+                margin: const EdgeInsets.only(bottom: 5),
+                padding: const EdgeInsets.fromLTRB(10, 6, 10, 6),
+                decoration: hudDeco(border: Colors.white24, width: 1, radius: 8, color: Colors.white.withOpacity(0.03), tick: false),
+                child: Row(children: [
+                  Expanded(child: Text(t, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold))),
+                  Text(sub, style: const TextStyle(fontSize: 10.5, color: Colors.white54)),
+                ]),
+              ),
+            );
+        Widget head(String t) => Padding(padding: const EdgeInsets.fromLTRB(2, 6, 0, 4), child: Text(t, style: TextStyle(fontFamily: kFont, fontSize: 8, color: th.c2)));
+        return Dialog(
+          backgroundColor: const Color(0xFF0C0D10),
+          shape: HudBorder(cut: 14, side: BorderSide(color: th.c, width: 1.3)),
+          insetPadding: const EdgeInsets.symmetric(horizontal: 80, vertical: 16),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              const Text('เทียบ Δ% กับไฟล์ไหน', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+              Flexible(
+                child: ListView(shrinkWrap: true, children: [
+                  if (s.orig != null) ...[
+                    head('ไฟล์ตอนเปิด'),
+                    item(s.binName ?? 'ไฟล์ตอนเปิด', 'ก่อนแก้ในรอบนี้', ('${s.binName ?? ''} (ตอนเปิด)', () async => s.orig)),
+                  ],
+                  head('ORIGINAL ในแอป'),
+                  for (final o in kOriginals)
+                    item('${o.model.isEmpty ? o.name : o.model}  ${o.name}', '${o.binKb} KB', ('${o.binName} (ORIGINAL ในแอป)', () async => (await rootBundle.load(o.bin)).buffer.asUint8List())),
+                  if (BinLib.i.items.isNotEmpty) head('คลังไฟล์'),
+                  for (final e in BinLib.i.items)
+                    item(e.name, '${(e.size / 1024).toStringAsFixed(0)} KB · ${_dateStr(e.time)}', ('${e.name}.bin (คลังไฟล์)', () async => BinLib.i.read(e))),
+                ]),
+              ),
+            ]),
+          ),
+        );
+      },
+    );
+    if (pick == null || !mounted) return;
+    try {
+      final b = await pick.$2();
+      if (b == null) return;
+      s.setCmp(pick.$1, b);
+      if (b.length != (s.bin?.length ?? 0)) _snack('ขนาดไฟล์ไม่เท่ากัน — เทียบได้เฉพาะช่องที่อยู่ในขนาดไฟล์');
+      setState(() => showPct = true);
+    } catch (e) {
+      _snack('เปิดไฟล์ที่ใช้เทียบไม่ได้: $e');
+    }
+  }
+
+  /// สรุป Δ% ของตารางที่เปิดอยู่
+  String _pctInfo(XdfTable t) {
+    int n = 0, all = 0;
+    double mx = 0, mn = 0, sum = 0;
+    for (int r = 0; r < t.rows; r++) {
+      for (int c = 0; c < t.cols; c++) {
+        final d = s.pctDiff(t, r, c);
+        if (d == null) continue;
+        all++;
+        sum += d;
+        if (d.abs() >= 0.05) n++;
+        if (d > mx) mx = d;
+        if (d < mn) mn = d;
+      }
+    }
+    if (all == 0) return 'Δ% เทียบไม่ได้';
+    String f(double v) => '${v > 0 ? '+' : ''}${v.toStringAsFixed(1)}%';
+    return 'ต่าง $n/$all ช่อง · มากสุด ${f(mx)} · น้อยสุด ${f(mn)} · เฉลี่ย ${f(sum / all)}';
+  }
+
+  // ---- AFR → จูนอัตโนมัติ ----
+  Future<void> _afrTune() async {
+    final t = s.table;
+    if (t == null || !t.valid || !t.is2D) {
+      _snack('เลือกตารางน้ำมัน (2D แกน RPM × TPS) ก่อน');
+      return;
+    }
+    final ky = _axisKind(s.axisNums(t, false)), kx = _axisKind(s.axisNums(t, true));
+    if (!((ky == 1 && kx == 2) || (ky == 2 && kx == 1))) {
+      _snack('ตารางนี้ไม่มีแกน RPM + TPS — เลือกตารางน้ำมันก่อน');
+      return;
+    }
+    AfrLog.i.attach(c);
+    AfrLog.i.syncAxes(s);
+    if (!AfrLog.i.ready || AfrLog.i.filled == 0) {
+      _snack('ยังไม่มีข้อมูล AFR LOG — วิ่งเก็บค่าที่หน้า AFR LOG ก่อน');
+      return;
+    }
+    final out = await Navigator.of(context).push<Map<(int, int), double>>(hudRoute(AfrTunePage(s: s, t: t)));
+    if (out == null || out.isEmpty || !mounted) return;
+    if (!await _canEdit(t)) return;
+    final n = _w(t, out, 'AFR → จูน ${out.length} ช่อง');
+    _snack('ใส่ค่าจาก AFR ลง ${t.title} แล้ว $n ช่อง — ย้อนกลับ (↶) ได้');
+  }
+
   Future<void> _openAfr() async {
     AfrLog.i.attach(c);
     AfrLog.i.syncAxes(s);
-    await Navigator.of(context).push(MaterialPageRoute(builder: (_) => AfrLogPage(c: c)));
+    await Navigator.of(context).push(hudRoute(AfrLogPage(c: c)));
   }
 
   double _adjLeft() {
@@ -6889,7 +7447,7 @@ class _TunePageState extends State<TunePage> {
                 painter: _GridPainter(
                   s: s, t: t, v: v, lo: lo, hi: hi, rowL: rowL, colL: colL,
                   sx: sx, sy: sy, cw: cw, ch: ch, hw: hw, hh: hh,
-                  sel: _sel, lr: lp.$1, lc: lp.$2, th: th, rev: s.rev,
+                  sel: _sel, lr: lp.$1, lc: lp.$2, th: th, rev: s.rev, pct: showPct && s.cmpRef != null,
                 ),
               ),
             ),
@@ -7087,11 +7645,12 @@ class _GridPainter extends CustomPainter {
   final double? lr, lc;
   final AppTheme th;
   final int rev;
+  final bool pct; // แสดง Δ% เทียบไฟล์อ้างอิง
   _GridPainter({
     required this.s, required this.t, required this.v, required this.lo, required this.hi,
     required this.rowL, required this.colL, required this.sx, required this.sy,
     required this.cw, required this.ch, required this.hw, required this.hh,
-    required this.sel, required this.lr, required this.lc, required this.th, required this.rev,
+    required this.sel, required this.lr, required this.lc, required this.th, required this.rev, this.pct = false,
   });
 
   @override
@@ -7118,11 +7677,31 @@ class _GridPainter extends CustomPainter {
       for (int c = c0; c <= c1; c++) {
         final rect = Rect.fromLTWH(cx(c), cy(r), cw, ch);
         final x = v[r][c];
+        if (pct) {
+          // Δ%: เทาเมื่อเท่าเดิม, แดง = เพิ่ม, ฟ้า = ลด (เข้มตามขนาด เต็มที่ 8%)
+          final d = s.pctDiff(t, r, c);
+          Color col;
+          if (d == null) {
+            col = const Color(0xFF121216);
+          } else if (d.abs() < 0.05) {
+            col = const Color(0xFF2A2A33);
+          } else {
+            final k = (d.abs() / 8).clamp(0.0, 1.0).toDouble();
+            col = d > 0 ? Color.lerp(const Color(0xFF3C2828), const Color(0xFFFF463C), k)! : Color.lerp(const Color(0xFF28283C), const Color(0xFF3C8CFF), k)!;
+          }
+          fill.color = col;
+          canvas.drawRect(rect.deflate(cw > 16 ? 0.5 : 0.2), fill);
+          if (showTxt) {
+            final txt = d == null ? '·' : (d.abs() < 0.05 ? '0' : '${d > 0 ? '+' : ''}${d.toStringAsFixed(1)}');
+            _TP.center(canvas, _TP.get(txt, fs, d == null || d.abs() < 0.05 ? Colors.white38 : Colors.white, maxW: cw), rect.center);
+          }
+        } else {
         final col = _heat(hi > lo ? (x - lo) / span : 0.5);
         fill.color = col;
         canvas.drawRect(rect.deflate(cw > 16 ? 0.5 : 0.2), fill);
         if (showTxt) {
           _TP.center(canvas, _TP.get(t.fmt(x), fs, const Color(0xFF000000), maxW: cw), rect.center);   // ตัวเลขสีดำทุกช่อง
+        }
         }
         if (s.cellChanged(t, r, c)) {
           canvas.drawPath(
@@ -7970,9 +8549,524 @@ String _dateStr(DateTime t) {
 }
 
 // ---------- หน้า FLASH ECU (แยกจากหน้าเขียนตาราง TUNE) ----------
+// ---------- สมุดลูกค้า: รายชื่อ + รถ + ID กล่อง + ประวัติงาน (เก็บในเครื่อง customers.json) ----------
+class CustJob {
+  DateTime time;
+  String kind; // FLASH / TUNE / NOTE
+  String file; // ชื่อไฟล์ในคลัง (ไม่มี .bin) หรือชื่อไฟล์จากมือถือ
+  String note;
+  CustJob(this.time, this.kind, {this.file = '', this.note = ''});
+  Map<String, dynamic> toJson() => {'t': time.millisecondsSinceEpoch, 'k': kind, 'f': file, 'n': note};
+  static CustJob fromJson(Map j) =>
+      CustJob(DateTime.fromMillisecondsSinceEpoch((j['t'] as num?)?.toInt() ?? 0), '${j['k'] ?? 'NOTE'}', file: '${j['f'] ?? ''}', note: '${j['n'] ?? ''}');
+}
+
+class Customer {
+  String id, name, phone, plate, model, ecu, note;
+  final List<CustJob> jobs;
+  Customer(this.id, {this.name = '', this.phone = '', this.plate = '', this.model = '', this.ecu = '', this.note = '', List<CustJob>? jobs}) : jobs = jobs ?? [];
+  DateTime get last => jobs.isEmpty ? DateTime.fromMillisecondsSinceEpoch(int.tryParse(id) ?? 0) : jobs.map((j) => j.time).reduce((a, b) => a.isAfter(b) ? a : b);
+  CustJob? lastOf(String kind) {
+    CustJob? r;
+    for (final j in jobs) {
+      if ((kind.isEmpty ? j.kind != 'NOTE' : j.kind == kind) && j.file.isNotEmpty && (r == null || j.time.isAfter(r.time))) r = j;
+    }
+    return r;
+  }
+
+  Map<String, dynamic> toJson() =>
+      {'id': id, 'name': name, 'phone': phone, 'plate': plate, 'model': model, 'ecu': ecu, 'note': note, 'jobs': jobs.map((j) => j.toJson()).toList()};
+  static Customer fromJson(Map j) => Customer('${j['id']}',
+      name: '${j['name'] ?? ''}', phone: '${j['phone'] ?? ''}', plate: '${j['plate'] ?? ''}', model: '${j['model'] ?? ''}',
+      ecu: '${j['ecu'] ?? ''}', note: '${j['note'] ?? ''}', jobs: [for (final x in (j['jobs'] as List? ?? const [])) CustJob.fromJson(x as Map)]);
+}
+
+String ecuHex(List<int>? e) => e == null ? '' : e.map((b) => b.toRadixString(16).padLeft(2, '0').toUpperCase()).join(' ');
+
+class CustBook extends ChangeNotifier {
+  static final CustBook i = CustBook._();
+  CustBook._();
+  final List<Customer> items = [];
+  bool loaded = false;
+
+  Future<io.File> _f() async => io.File('${(await getApplicationDocumentsDirectory()).path}/customers.json');
+
+  Future<void> load() async {
+    if (loaded) return;
+    try {
+      final f = await _f();
+      if (await f.exists()) {
+        items
+          ..clear()
+          ..addAll([for (final j in jsonDecode(await f.readAsString()) as List) Customer.fromJson(j as Map)]);
+      }
+    } catch (_) {}
+    loaded = true;
+    _sort();
+    notifyListeners();
+  }
+
+  void _sort() => items.sort((a, b) => b.last.compareTo(a.last));
+
+  Future<void> save() async {
+    _sort();
+    notifyListeners();
+    try {
+      await (await _f()).writeAsString(jsonEncode(items.map((c) => c.toJson()).toList()), flush: true);
+    } catch (_) {}
+  }
+
+  Customer? byEcu(String hex) {
+    if (hex.isEmpty) return null;
+    for (final c in items) {
+      if (c.ecu == hex) return c;
+    }
+    return null;
+  }
+
+  Future<void> addJob(Customer c, CustJob j) async {
+    if (!items.contains(c)) items.add(c);
+    c.jobs.add(j);
+    await save();
+  }
+
+  Future<void> remove(Customer c) async {
+    items.remove(c);
+    await save();
+  }
+}
+
+/// แก้ข้อมูลลูกค้า (คืน true = บันทึก)
+Future<bool> editCustomer(BuildContext context, Customer cu, {String? liveEcu}) async {
+  final th = Cfg.i.t;
+  final ctl = {
+    'name': TextEditingController(text: cu.name),
+    'plate': TextEditingController(text: cu.plate),
+    'model': TextEditingController(text: cu.model),
+    'phone': TextEditingController(text: cu.phone),
+    'ecu': TextEditingController(text: cu.ecu),
+    'note': TextEditingController(text: cu.note),
+  };
+  Widget f(String k, String label, {TextInputType? kb, Widget? suffix}) => Padding(
+        padding: const EdgeInsets.only(bottom: 6),
+        child: TextField(
+          controller: ctl[k],
+          keyboardType: kb,
+          style: const TextStyle(fontSize: 14),
+          decoration: InputDecoration(isDense: true, labelText: label, suffixIcon: suffix, border: const OutlineInputBorder()),
+        ),
+      );
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (d) => Dialog(
+      backgroundColor: const Color(0xFF0C0D10),
+      shape: HudBorder(cut: 14, side: BorderSide(color: th.c, width: 1.3)),
+      insetPadding: const EdgeInsets.symmetric(horizontal: 90, vertical: 12),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(14, 10, 14, 8),
+        child: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            Text(cu.name.isEmpty ? 'เพิ่มลูกค้า' : 'แก้ข้อมูลลูกค้า', style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            Row(children: [Expanded(child: f('name', 'ชื่อลูกค้า')), const SizedBox(width: 8), Expanded(child: f('phone', 'เบอร์โทร', kb: TextInputType.phone))]),
+            Row(children: [Expanded(child: f('plate', 'ทะเบียน')), const SizedBox(width: 8), Expanded(child: f('model', 'รุ่นรถ'))]),
+            f('ecu', 'ID กล่อง',
+                suffix: liveEcu == null || liveEcu.isEmpty
+                    ? null
+                    : TextButton(onPressed: () => ctl['ecu']!.text = liveEcu, child: const Text('ใช้กล่องที่ต่ออยู่', style: TextStyle(fontSize: 11)))),
+            f('note', 'โน้ต (ของแต่ง ฯลฯ)'),
+            Row(mainAxisAlignment: MainAxisAlignment.end, children: [
+              TextButton(onPressed: () => Navigator.of(d).pop(false), child: const Text('ยกเลิก')),
+              TextButton(onPressed: () => Navigator.of(d).pop(true), child: const Text('บันทึก')),
+            ]),
+          ]),
+        ),
+      ),
+    ),
+  );
+  if (ok == true) {
+    cu
+      ..name = ctl['name']!.text.trim()
+      ..plate = ctl['plate']!.text.trim()
+      ..model = ctl['model']!.text.trim()
+      ..phone = ctl['phone']!.text.trim()
+      ..ecu = ctl['ecu']!.text.trim().toUpperCase()
+      ..note = ctl['note']!.text.trim();
+    if (cu.name.isEmpty) cu.name = cu.plate.isEmpty ? 'ลูกค้า' : cu.plate;
+  }
+  for (final x in ctl.values) {
+    x.dispose();
+  }
+  return ok == true;
+}
+
+/// หลังแฟลชสำเร็จ: ถามว่าจะบันทึกเข้าลูกค้าคนไหน (ID กล่องตรง = เลือกให้อัตโนมัติ)
+Future<void> askSaveFlashJob(BuildContext context, {required String file, required String ecu, String note = ''}) async {
+  final bk = CustBook.i;
+  await bk.load();
+  if (!context.mounted) return;
+  final th = Cfg.i.t;
+  Customer? sel = bk.byEcu(ecu);
+  final res = await showDialog<Object>(
+    context: context,
+    builder: (d) => StatefulBuilder(
+      builder: (d, ss) => Dialog(
+        backgroundColor: const Color(0xFF0C0D10),
+        shape: HudBorder(cut: 14, side: BorderSide(color: kGreen, width: 1.3)),
+        insetPadding: const EdgeInsets.symmetric(horizontal: 110, vertical: 16),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 10, 14, 8),
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+            const Text('แฟลชสำเร็จ — บันทึกเข้าสมุดลูกค้า?', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: kGreen)),
+            Text('$file${ecu.isEmpty ? '' : '  ·  ID $ecu'}', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 11, color: Colors.white54)),
+            const SizedBox(height: 6),
+            Flexible(
+              child: ListView(shrinkWrap: true, children: [
+                for (final cu in bk.items)
+                  InkWell(
+                    onTap: () => ss(() => sel = cu),
+                    child: Container(
+                      margin: const EdgeInsets.only(bottom: 4),
+                      padding: const EdgeInsets.fromLTRB(10, 6, 10, 6),
+                      decoration: hudDeco(border: identical(sel, cu) ? th.c : Colors.white24, width: identical(sel, cu) ? 1.5 : 1, radius: 8,
+                          color: identical(sel, cu) ? th.c.withOpacity(0.18) : Colors.white.withOpacity(0.03), tick: false),
+                      child: Row(children: [
+                        Expanded(child: Text('${cu.name}  ${cu.plate}', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold))),
+                        if (ecu.isNotEmpty && cu.ecu == ecu) const Text('ID ตรง', style: TextStyle(fontSize: 10.5, color: kGreen)),
+                        Text('  ${cu.model}', style: const TextStyle(fontSize: 11, color: Colors.white54)),
+                      ]),
+                    ),
+                  ),
+              ]),
+            ),
+            Row(children: [
+              TextButton(onPressed: () => Navigator.of(d).pop('new'), child: const Text('+ ลูกค้าใหม่')),
+              const Spacer(),
+              TextButton(onPressed: () => Navigator.of(d).pop(), child: const Text('ข้าม')),
+              TextButton(onPressed: sel == null ? null : () => Navigator.of(d).pop(sel), child: const Text('บันทึก')),
+            ]),
+          ]),
+        ),
+      ),
+    ),
+  );
+  if (res == null || !context.mounted) return;
+  Customer cu;
+  if (res is Customer) {
+    cu = res;
+  } else {
+    cu = Customer('${DateTime.now().millisecondsSinceEpoch}', ecu: ecu);
+    if (!await editCustomer(context, cu, liveEcu: ecu)) return;
+  }
+  if (cu.ecu.isEmpty && ecu.isNotEmpty) cu.ecu = ecu;
+  await bk.addJob(cu, CustJob(DateTime.now(), 'FLASH', file: file, note: note));
+}
+
+class CustomerPage extends StatefulWidget {
+  final GaugeController c;
+  const CustomerPage({super.key, required this.c});
+  @override
+  State<CustomerPage> createState() => _CustomerPageState();
+}
+
+class _CustomerPageState extends State<CustomerPage> {
+  final bk = CustBook.i;
+  Customer? sel;
+  String q = '';
+
+  void _rb() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    bk.addListener(_rb);
+    widget.c.addListener(_rb);
+    bk.load().then((_) {
+      if (!mounted) return;
+      final live = bk.byEcu(ecuHex(widget.c.t.fl?.ecm));
+      setState(() => sel = live ?? (bk.items.isEmpty ? null : bk.items.first));
+    });
+    BinLib.i.load();
+  }
+
+  @override
+  void dispose() {
+    bk.removeListener(_rb);
+    widget.c.removeListener(_rb);
+    super.dispose();
+  }
+
+  void _snack(String m) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(duration: const Duration(seconds: 3), content: Text(m)));
+  }
+
+  String get _live => ecuHex(widget.c.t.fl?.ecm);
+
+  Future<void> _add() async {
+    final cu = Customer('${DateTime.now().millisecondsSinceEpoch}', ecu: _live);
+    if (!await editCustomer(context, cu, liveEcu: _live)) return;
+    bk.items.add(cu);
+    await bk.save();
+    setState(() => sel = cu);
+  }
+
+  Future<void> _note(Customer cu) async {
+    final ctl = TextEditingController();
+    String kind = 'NOTE';
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (d) => StatefulBuilder(
+        builder: (d, ss) => AlertDialog(
+          backgroundColor: const Color(0xFF14141A),
+          title: const Text('บันทึกงาน', style: TextStyle(fontSize: 15)),
+          content: Column(mainAxisSize: MainAxisSize.min, children: [
+            Row(children: [
+              for (final k in const ['NOTE', 'TUNE'])
+                Padding(
+                  padding: const EdgeInsets.only(right: 6),
+                  child: ChoiceChip(label: Text(k == 'NOTE' ? 'โน้ต' : 'จูน'), selected: kind == k, onSelected: (_) => ss(() => kind = k)),
+                ),
+            ]),
+            TextField(controller: ctl, autofocus: true, decoration: const InputDecoration(hintText: 'เช่น เปลี่ยนท่อ, AFR ก่อน 14.6 → หลัง 13.1')),
+          ]),
+          actions: [
+            TextButton(onPressed: () => Navigator.of(d).pop(false), child: const Text('ยกเลิก')),
+            TextButton(onPressed: () => Navigator.of(d).pop(true), child: const Text('บันทึก')),
+          ],
+        ),
+      ),
+    );
+    final t = ctl.text.trim();
+    ctl.dispose();
+    if (ok != true || t.isEmpty) return;
+    await bk.addJob(cu, CustJob(DateTime.now(), kind, note: t));
+  }
+
+  BinEntry? _libOf(CustJob? j) {
+    if (j == null) return null;
+    for (final e in BinLib.i.items) {
+      if (e.name == j.file || '${e.name}.bin' == j.file) return e;
+    }
+    return null;
+  }
+
+  Future<void> _delete(Customer cu) async {
+    if (!await askYes(context, 'ลบลูกค้า', 'ลบ ${cu.name} และประวัติทั้งหมด', ok: 'ลบ', col: kBad)) return;
+    await bk.remove(cu);
+    setState(() => sel = bk.items.isEmpty ? null : bk.items.first);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final th = Cfg.i.t;
+    final ql = q.toLowerCase();
+    final list = [
+      for (final cu in bk.items)
+        if (ql.isEmpty || '${cu.name} ${cu.plate} ${cu.model} ${cu.phone} ${cu.ecu}'.toLowerCase().contains(ql)) cu
+    ];
+    final cu = sel != null && bk.items.contains(sel) ? sel : null;
+    final live = _live;
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Stack(fit: StackFit.expand, children: [
+        Image.asset('assets/bg.jpg', fit: BoxFit.cover),
+        Container(color: Colors.black.withOpacity(0.84)),
+        const HudGrid(),
+        SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(8, 4, 8, 6),
+            child: Column(children: [
+              SizedBox(
+                height: 34,
+                child: Row(children: [
+                  InkWell(
+                    onTap: () => Navigator.of(context).pop(),
+                    child: Row(children: [
+                      Icon(Icons.chevron_left, color: th.c, size: 26),
+                      Text('CUSTOMER', style: TextStyle(fontFamily: kFont, fontSize: 13, color: th.c, shadows: [Shadow(color: th.c, blurRadius: 8)])),
+                      const Text('  สมุดลูกค้า', style: TextStyle(fontSize: 12, color: Colors.white60)),
+                    ]),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: SizedBox(
+                      height: 32,
+                      child: TextField(
+                        onChanged: (v) => setState(() => q = v.trim()),
+                        style: const TextStyle(fontSize: 13),
+                        decoration: InputDecoration(
+                          isDense: true, hintText: 'ค้นหา ชื่อ / ทะเบียน / รุ่น / ID', prefixIcon: const Icon(Icons.search, size: 18),
+                          contentPadding: const EdgeInsets.symmetric(vertical: 6), border: OutlineInputBorder(borderSide: BorderSide(color: th.c)),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  InkWell(
+                    onTap: _add,
+                    child: Container(
+                      height: 32,
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      alignment: Alignment.center,
+                      decoration: hudDeco(border: th.c, width: 1.3, radius: 8, color: th.c.withOpacity(0.3)),
+                      child: const Text('+ เพิ่มลูกค้า', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.bold)),
+                    ),
+                  ),
+                ]),
+              ),
+              const SizedBox(height: 6),
+              Expanded(
+                child: Row(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                  Container(
+                    width: 250,
+                    padding: const EdgeInsets.all(6),
+                    decoration: hudDeco(border: th.c.withOpacity(0.85), width: 1.1, radius: 12, color: const Color(0xCC060606)),
+                    child: list.isEmpty
+                        ? Center(child: Text(bk.items.isEmpty ? 'ยังไม่มีลูกค้า\nกด + เพิ่มลูกค้า' : 'ไม่พบ', textAlign: TextAlign.center, style: const TextStyle(color: Colors.white38)))
+                        : ListView(children: [
+                            for (final x in list)
+                              InkWell(
+                                onTap: () => setState(() => sel = x),
+                                child: Container(
+                                  margin: const EdgeInsets.only(bottom: 5),
+                                  padding: const EdgeInsets.fromLTRB(9, 5, 9, 5),
+                                  decoration: hudDeco(border: identical(x, cu) ? th.c : Colors.white24, width: identical(x, cu) ? 1.5 : 1, radius: 8,
+                                      color: identical(x, cu) ? th.c.withOpacity(0.16) : Colors.white.withOpacity(0.03), tick: false),
+                                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                    Row(children: [
+                                      Expanded(child: Text(x.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.bold))),
+                                      if (live.isNotEmpty && x.ecu == live) const Text('● ต่ออยู่', style: TextStyle(fontSize: 9.5, color: kGreen)),
+                                    ]),
+                                    Text('${x.plate}${x.model.isEmpty ? '' : ' · ${x.model}'}', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 11, color: Colors.white60)),
+                                    Text('ล่าสุด ${_dateStr(x.last)} · ${x.jobs.length} งาน', style: const TextStyle(fontSize: 9.5, color: Colors.white38)),
+                                  ]),
+                                ),
+                              ),
+                          ]),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Container(
+                      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+                      decoration: hudDeco(border: th.c.withOpacity(0.85), width: 1.1, radius: 12, color: const Color(0xCC060606)),
+                      child: cu == null ? const Center(child: Text('เลือกลูกค้าทางซ้าย', style: TextStyle(color: Colors.white38))) : _detail(th, cu, live),
+                    ),
+                  ),
+                ]),
+              ),
+            ]),
+          ),
+        ),
+      ]),
+    );
+  }
+
+  Widget _btn(AppTheme th, String t, VoidCallback? f, {Color? col}) => Opacity(
+        opacity: f == null ? 0.4 : 1,
+        child: InkWell(
+          onTap: f,
+          child: Container(
+            height: 34,
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            alignment: Alignment.center,
+            decoration: hudDeco(border: col ?? th.c, width: 1.3, radius: 8, color: (col ?? th.c).withOpacity(0.18)),
+            child: Text(t, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.bold)),
+          ),
+        ),
+      );
+
+  Widget _detail(AppTheme th, Customer cu, String live) {
+    final lastFile = cu.lastOf('');
+    final lastFlash = cu.lastOf('FLASH');
+    final eFile = _libOf(lastFile), eFlash = _libOf(lastFlash);
+    Widget kv(String k, String v, {Color? col}) => Padding(
+          padding: const EdgeInsets.only(bottom: 3),
+          child: Row(children: [
+            SizedBox(width: 70, child: Text(k, style: const TextStyle(fontSize: 11.5, color: Colors.white54))),
+            Expanded(child: Text(v.isEmpty ? '-' : v, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 13, color: col ?? Colors.white))),
+          ]),
+        );
+    final jobs = [...cu.jobs]..sort((a, b) => b.time.compareTo(a.time));
+    return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+      Row(children: [
+        Expanded(child: Text(cu.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 19, fontWeight: FontWeight.bold, shadows: [Shadow(color: th.c, blurRadius: 8)]))),
+        IconButton(
+          visualDensity: VisualDensity.compact,
+          icon: Icon(Icons.edit, size: 19, color: th.c),
+          onPressed: () async {
+            if (await editCustomer(context, cu, liveEcu: live)) await bk.save();
+          },
+        ),
+        IconButton(visualDensity: VisualDensity.compact, icon: const Icon(Icons.delete_outline, size: 19, color: kBad), onPressed: () => _delete(cu)),
+      ]),
+      Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Expanded(child: Column(children: [kv('ทะเบียน', cu.plate), kv('รุ่นรถ', cu.model), kv('เบอร์โทร', cu.phone)])),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(children: [
+            kv('ID กล่อง', cu.ecu, col: live.isNotEmpty && cu.ecu == live ? kGreen : null),
+            kv('โน้ต', cu.note),
+            kv('ไฟล์ล่าสุด', lastFile?.file ?? ''),
+          ]),
+        ),
+      ]),
+      const SizedBox(height: 6),
+      Text('ประวัติงาน (${cu.jobs.length})', style: TextStyle(fontFamily: kFont, fontSize: 8.5, color: th.c2)),
+      const SizedBox(height: 4),
+      Expanded(
+        child: jobs.isEmpty
+            ? const Center(child: Text('ยังไม่มีประวัติ — แฟลชสำเร็จแล้วแอพจะถามให้บันทึก', style: TextStyle(fontSize: 11.5, color: Colors.white38)))
+            : ListView(children: [
+                for (final j in jobs)
+                  GestureDetector(
+                    onLongPress: () async {
+                      if (!await askYes(context, 'ลบรายการ', '${_dateStr(j.time)} ${j.kind} ${j.file}', ok: 'ลบ', col: kBad)) return;
+                      cu.jobs.remove(j);
+                      await bk.save();
+                    },
+                    child: Container(
+                      margin: const EdgeInsets.only(bottom: 4),
+                      padding: const EdgeInsets.fromLTRB(8, 4, 8, 4),
+                      decoration: BoxDecoration(border: Border(left: BorderSide(color: j.kind == 'FLASH' ? kGreen : (j.kind == 'TUNE' ? kAmber : Colors.white38), width: 3))),
+                      child: Row(children: [
+                        SizedBox(width: 82, child: Text(_dateStr(j.time), style: const TextStyle(fontSize: 10.5, color: Colors.white54))),
+                        SizedBox(
+                          width: 50,
+                          child: Text(j.kind == 'FLASH' ? 'แฟลช' : (j.kind == 'TUNE' ? 'จูน' : 'โน้ต'),
+                              style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.bold, color: j.kind == 'FLASH' ? kGreen : (j.kind == 'TUNE' ? kAmber : Colors.white70))),
+                        ),
+                        Expanded(
+                          child: Text([if (j.file.isNotEmpty) j.file, if (j.note.isNotEmpty) j.note].join('  ·  '),
+                              maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12)),
+                        ),
+                      ]),
+                    ),
+                  ),
+              ]),
+      ),
+      const SizedBox(height: 6),
+      Row(children: [
+        _btn(th, '+ บันทึกงาน', () => _note(cu)),
+        const SizedBox(width: 6),
+        _btn(th, 'เปิดไฟล์ล่าสุดใน TUNE', eFile == null ? null : () => Navigator.of(context).push(hudRoute(TunePage(c: widget.c, initial: eFile)))),
+        const SizedBox(width: 6),
+        _btn(th, '⚡ แฟลชไฟล์ล่าสุด', eFlash == null ? null : () => Navigator.of(context).push(hudRoute(FlashPage(c: widget.c, initial: eFlash))), col: kGreen),
+      ]),
+      if (lastFile != null && eFile == null)
+        const Padding(padding: EdgeInsets.only(top: 3), child: Text('ไฟล์ล่าสุดไม่อยู่ในคลังไฟล์ (เลือกจากมือถือ) — เปิดซ้ำจากแอพไม่ได้', style: TextStyle(fontSize: 9.5, color: Colors.white38))),
+    ]);
+  }
+}
+
 class FlashPage extends StatefulWidget {
   final GaugeController c;
-  const FlashPage({super.key, required this.c});
+  final BinEntry? initial; // เปิดหน้ามาพร้อมไฟล์จากคลัง (จากสมุดลูกค้า)
+  const FlashPage({super.key, required this.c, this.initial});
   @override
   State<FlashPage> createState() => _FlashPageState();
 }
@@ -8002,8 +9096,19 @@ class _FlashPageState extends State<FlashPage> {
     return _plan!;
   }
 
+  int _lastPh = -1;
   void _rb() {
     if (mounted) setState(() {});
+    // แฟลชสำเร็จ (เปลี่ยนจากกำลังแฟลช → 9): ถามบันทึกเข้าสมุดลูกค้า
+    final ph = c.t.fl?.phase ?? -1;
+    if (ph == 9 && _lastPh >= 4 && _lastPh <= 8) {
+      final file = sel?.name ?? extName ?? '';
+      final ecu = ecuHex(c.t.fl?.ecm);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) askSaveFlashJob(context, file: file, ecu: ecu);
+      });
+    }
+    if (ph != _lastPh) _lastPh = ph;
   }
 
   @override
@@ -8013,6 +9118,8 @@ class _FlashPageState extends State<FlashPage> {
     c.addListener(_rb);
     Cfg.i.addListener(_rb);
     lib.load();
+    final e = widget.initial;
+    if (e != null) _select(e);
   }
 
   @override
