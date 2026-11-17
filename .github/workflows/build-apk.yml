@@ -177,6 +177,28 @@ jobs:
             echo "no assets/icon.png - using default icon"
           fi
 
+      # กุญแจเซ็นแอพถาวร (Secret KEYSTORE_B64) -> แอพทุกเวอร์ชันเซ็นด้วยกุญแจเดียวกัน = ติดตั้งทับของเก่าได้ ไม่ต้องลบแอพ
+      # (ไม่มี Secret = ใช้กุญแจชั่วคราวของเครื่อง build เหมือนเดิม -> ติดตั้งทับไม่ได้)
+      - name: Use fixed signing key
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            mkdir -p ~/.android
+            printf '%s' "$KEYSTORE_B64" | tr -d ' \r\n' | base64 -d > ~/.android/debug.keystore
+            # เผื่อเครื่อง build ตั้งที่เก็บกุญแจไว้ที่อื่น
+            for d in "$ANDROID_USER_HOME" "${ANDROID_SDK_HOME:+$ANDROID_SDK_HOME/.android}"; do
+              [ -n "$d" ] && mkdir -p "$d" && cp ~/.android/debug.keystore "$d/debug.keystore"
+            done
+            if keytool -list -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey > /dev/null; then
+              echo "ใช้กุญแจถาวรจาก Secret KEYSTORE_B64"
+            else
+              echo "Secret KEYSTORE_B64 ไม่ถูกต้อง (คัดลอกข้อความไม่ครบ?)"; exit 1
+            fi
+          else
+            echo "ไม่มี Secret KEYSTORE_B64 - ใช้กุญแจชั่วคราว (ติดตั้งทับแอพเก่าไม่ได้)"
+          fi
+
       # ลอง build ซ้ำสูงสุด 3 ครั้ง (ถ้าโหลดไลบรารีจาก Maven/GitHub ล้มชั่วคราว)
       - name: Build APK
         run: |
@@ -185,6 +207,10 @@ jobs:
             echo "build ล้ม (รอบ $i) รอ 30 วินาทีแล้วลองใหม่"; sleep 30
           done
           exit 1
+
+      # แสดงลายนิ้วมือกุญแจที่เซ็น APK (ต้องเหมือนกันทุกรอบ = ติดตั้งทับได้)
+      - name: Show APK signing fingerprint
+        run: keytool -printcert -jarfile build/app/outputs/flutter-apk/app-release.apk | grep -m1 'SHA256' || true
 
       - uses: actions/upload-artifact@v4
         with:
