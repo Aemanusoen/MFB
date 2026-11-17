@@ -210,7 +210,13 @@ jobs:
 
       # แสดงลายนิ้วมือกุญแจที่เซ็น APK (ต้องเหมือนกันทุกรอบ = ติดตั้งทับได้)
       - name: Show APK signing fingerprint
-        run: keytool -printcert -jarfile build/app/outputs/flutter-apk/app-release.apk | grep -m1 'SHA256' || true
+        run: |
+          AS=$(ls -d "$ANDROID_HOME"/build-tools/*/ 2>/dev/null | sort -V | tail -1)apksigner
+          if [ -x "$AS" ]; then
+            "$AS" verify --print-certs build/app/outputs/flutter-apk/app-release.apk | grep -m1 'SHA-256' || true
+          else
+            echo "ไม่พบ apksigner"
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
