@@ -49,7 +49,7 @@ const kThemes = <AppTheme>[
 
 // เวอร์ชันเฟิร์มแวร์ที่แอพรุ่นนี้ออกแบบมาให้ใช้คู่กัน (แสดงเทียบในหน้า SETTING)
 const kAppFw = '1.0.20';
-const kAppVer = '1.4.3'; // เวอร์ชันแอพ (ตรงกับ pubspec.yaml)
+const kAppVer = '1.4.4'; // เวอร์ชันแอพ (ตรงกับ pubspec.yaml)
 
 // ---------- ค่าคีย์ที่แสดงได้ (เหมือน TEST1 + TOP SPD) ----------
 const int kTps = 0, kTemp = 1, kBatt = 2, kAfr = 3, kInj = 4, kIgn = 5, kRpm = 6, kMap = 7,
@@ -1727,7 +1727,9 @@ class GaugePage extends StatefulWidget {
 class _GaugePageState extends State<GaugePage> with SingleTickerProviderStateMixin {
   GaugeController get c => widget.c;
   // เปิดหน้า: เข็มกวาด 0 → สุด → 0 (~1.7 วิ) แล้ววิ่งตามค่าจริง
-  late final AnimationController sweep = AnimationController(vsync: this, duration: const Duration(milliseconds: 1700))..forward();
+  static bool _swept = false; // กวาดเข็มแล้วในการเปิดแอพครั้งนี้ (เข้าหน้า GAUGE ครั้งถัดไปไม่กวาด)
+  late final AnimationController sweep = AnimationController(vsync: this, duration: const Duration(milliseconds: 1700));
+
   double get _sweepFrac {
     final t = sweep.value;
     if (t < 0.12) return 0;
@@ -1748,6 +1750,10 @@ class _GaugePageState extends State<GaugePage> with SingleTickerProviderStateMix
     super.initState();
     c.addListener(_rebuild);
     Cfg.i.addListener(_rebuild);
+    if (!_swept) {
+      _swept = true;
+      sweep.forward();
+    }
   }
 
   @override
@@ -1786,6 +1792,8 @@ class _GaugePageState extends State<GaugePage> with SingleTickerProviderStateMix
                 const SizedBox(width: 12),
                 Expanded(child: statusChips(c)),
                 _btn('DEMO', c.toggleDemo, th, active: c.demo),
+                const SizedBox(width: 8),
+                glowIconBtn(Icons.settings, th, () => Navigator.of(context).push(hudRoute(SettingsPage(c: c)))),
               ]),
               const SizedBox(height: 6),
               Expanded(
@@ -2517,7 +2525,7 @@ class _GaugePageState extends State<GaugePage> with SingleTickerProviderStateMix
           builder: (_, __) => sweep.isAnimating
               ? CustomPaint(painter: GaugePainter(frac: _sweepFrac, r: r, th: th, shift: cfg.shift))
               : TweenAnimationBuilder<double>(
-                  tween: Tween<double>(begin: 0, end: frac),
+                  tween: Tween<double>(begin: sweep.isCompleted ? 0 : frac, end: frac),
                   duration: const Duration(milliseconds: 300),
                   builder: (_, v, __) => CustomPaint(painter: GaugePainter(frac: v, r: r, th: th, shift: cfg.shift)),
                 ),
@@ -2751,19 +2759,28 @@ class StatTile extends StatelessWidget {
        padding: EdgeInsets.only(bottom: bottomMargin),
        child: TapFlash(
         enabled: onTap != null,
-        child: Container(
-        decoration: ShapeDecoration(
-          gradient: const LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Color(0xF50D1018), Color(0xF5050507)]),
-          shape: HudBorder(cut: 11, side: BorderSide(color: col.withOpacity(active ? 1.0 : 0.9), width: active ? 2.0 : 1.2), tick: false),
-          shadows: [BoxShadow(color: col.withOpacity(active ? 0.85 : 0.10), blurRadius: active ? 18 : 6, spreadRadius: 0.5)],
-        ),
         child: Stack(children: [
-          Positioned.fill(child: IgnorePointer(child: CustomPaint(painter: _ScanPainter()))),
-          Positioned(
-            top: 3, left: 16,
-            child: Container(
-              width: 30, height: 2,
-              decoration: BoxDecoration(color: col, boxShadow: [BoxShadow(color: col, blurRadius: 6)]),
+          Positioned.fill(
+            child: RepaintBoundary(
+              child: IgnorePointer(
+                child: DecoratedBox(
+                  decoration: ShapeDecoration(
+                    gradient: const LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: [Color(0xF50D1018), Color(0xF5050507)]),
+                    shape: HudBorder(cut: 11, side: BorderSide(color: col.withOpacity(active ? 1.0 : 0.9), width: active ? 2.0 : 1.2), tick: false),
+                    shadows: [BoxShadow(color: col.withOpacity(active ? 0.85 : 0.10), blurRadius: active ? 18 : 6, spreadRadius: 0.5)],
+                  ),
+                  child: Stack(children: [
+                    Positioned.fill(child: CustomPaint(painter: _ScanPainter())),
+                    Positioned(
+                      top: 3, left: 16,
+                      child: Container(
+                        width: 30, height: 2,
+                        decoration: BoxDecoration(color: col, boxShadow: [BoxShadow(color: col, blurRadius: 6)]),
+                      ),
+                    ),
+                  ]),
+                ),
+              ),
             ),
           ),
           Padding(
@@ -2788,7 +2805,7 @@ class StatTile extends StatelessWidget {
                     child: RollNum(value,
                         style: TextStyle(
                             fontFamily: kFont, fontSize: valueSize, color: vcol,
-                            shadows: [Shadow(color: glow, blurRadius: 9), Shadow(color: glow.withOpacity(0.6), blurRadius: 3)])),
+                            shadows: [Shadow(color: glow.withOpacity(0.85), blurRadius: 7)])),
                   ),
                 ),
               ),
@@ -2810,7 +2827,6 @@ class StatTile extends StatelessWidget {
             ]),
           ),
         ]),
-       ),
        ),
       ),
      ),
@@ -2836,6 +2852,21 @@ class GaugePainter extends CustomPainter {
     final rect = Rect.fromCircle(center: c, radius: r - thick / 2);
     final seg = sweep / n;
 
+    // แสงเรืองใต้แท่งที่ติด: วาดเส้นเดียวไล่สีตามรอบ (เบลอครั้งเดียวต่อเฟรม)
+    if (frac > 0.005) {
+      final litSweep = sweep * frac.clamp(0.0, 1.0);
+      canvas.drawArc(rect, start, litSweep, false,
+          Paint()
+            ..shader = SweepGradient(
+              startAngle: 0,
+              endAngle: sweep,
+              colors: [for (int k = 0; k <= 8; k++) rpmColor(k / 8 * kMaxRpm, shift).withOpacity(0.7)],
+              transform: const GradientRotation(start),
+            ).createShader(Rect.fromCircle(center: c, radius: r))
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = thick
+            ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6));
+    }
     for (int i = 0; i < n; i++) {
       final pos = (i + 0.5) / n;
       final inZone = pos * kMaxRpm >= shift;
@@ -2843,14 +2874,6 @@ class GaugePainter extends CustomPainter {
       final a0 = start + seg * i + seg * 0.1;
       final segCol = rpmColor(pos * kMaxRpm, shift); // เขียว -> เหลือง -> แดง
       final col = lit ? segCol : (inZone ? zoneRed : Colors.white.withOpacity(0.13));
-      if (lit) {
-        canvas.drawArc(rect, a0, seg * 0.8, false,
-            Paint()
-              ..color = segCol.withOpacity(0.7)
-              ..style = PaintingStyle.stroke
-              ..strokeWidth = thick
-              ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6));
-      }
       canvas.drawArc(rect, a0, seg * 0.8, false,
           Paint()
             ..color = col
@@ -5414,7 +5437,7 @@ class _TunePageState extends State<TunePage> {
   // มุมมอง
   bool view3d = false, live = true;
   bool showPct = false; // โหมดเทียบไฟล์อ้างอิง
-  bool cmpReal = false; // ในโหมดเทียบ: false = Δ%, true = ค่าจริงของไฟล์ที่เทียบ
+  bool get _cmpOn => showPct && s.cmpRef != null; // อยู่หน้าไฟล์เทียบ = ดูอย่างเดียว
   int stepMul = 1;
   double yaw = -0.85, pitch = 0.62, zoom = 1, _zoom0 = 1;
   Offset pan3 = Offset.zero, _pan0 = Offset.zero, _mid0 = Offset.zero; // 2 นิ้วลาก = เลื่อนกราฟ 3D
@@ -5791,6 +5814,10 @@ class _TunePageState extends State<TunePage> {
 
   /// เขียนค่า + เตือนถ้ามีช่องชนค่าสุดของข้อมูล (ปรับได้อิสระถึงค่าต่ำสุด/สูงสุดที่ข้อมูลเก็บได้)
   int _w(XdfTable t, Map<(int, int), double> vals, String label, {bool merge = false}) {
+    if (_cmpOn) {
+      _toast('อยู่หน้าไฟล์เทียบ — แก้ไม่ได้ (กด เทียบ กลับไฟล์จริง)', col: kAmber);
+      return 0;
+    }
     final n = s.write(t, vals, label, merge: merge);
     if (s.lastClamp > 0) _toast('${s.lastClamp} ช่องชนค่าสุดของข้อมูล (${t.fmt(s.clampLo)} – ${t.fmt(s.clampHi)})');
     return n;
@@ -5963,14 +5990,14 @@ class _TunePageState extends State<TunePage> {
 
   void _copy() {
     final t = s.table;
-    if (t != null && showPct && s.cmpRef != null) {
+    if (t != null && _cmpOn) {
       final (r0, c0, r1, c1) = _sel ?? (0, 0, t.rows - 1, t.cols - 1);
       _clip = [
         for (int r = r0; r <= r1; r++) [for (int c = c0; c <= c1; c++) s.refVal(t, r, c) ?? double.nan],
       ];
       _clipFrom = '${t.title} (${s.cmpName})';
       setState(() {});
-      _snack('คัดลอก ${r1 - r0 + 1}×${c1 - c0 + 1} ช่องจากไฟล์เทียบ ${s.cmpName} แล้ว — เลือกช่องมุมซ้ายบนแล้วกด PASTE');
+      _snack('คัดลอก ${r1 - r0 + 1}×${c1 - c0 + 1} ช่องจากไฟล์เทียบแล้ว — กด เทียบ กลับไฟล์จริง เลือกช่องมุมซ้ายบน แล้วกด PASTE');
       return;
     }
     final g = _sel;
@@ -6864,19 +6891,19 @@ class _TunePageState extends State<TunePage> {
                 child: Row(children: [
                   Expanded(
                     child: Text(
-                        showPct && s.cmpName != null
-                            ? '${cmpReal ? 'ค่าจริงของ' : 'Δ% เทียบกับ'}: ${s.cmpName}  ·  แตะ ${cmpReal ? 'REF = ปิด' : 'Δ% = ดูค่าจริง'} · แตะค้าง = เปลี่ยนไฟล์'
+                        _cmpOn
+                            ? 'ไฟล์เทียบ: ${s.cmpName}'
                             : 'BIN: ${s.binName ?? '-'}     XDF: ${s.xdfName ?? '-'}',
-                        maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 10.5, color: showPct ? kGreen : Colors.white54)),
+                        maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 10.5, color: _cmpOn ? kAmber : Colors.white54, fontWeight: _cmpOn ? FontWeight.bold : null)),
                   ),
-                  if (s.ready && t != null && t.valid) Text(showPct && s.cmpRef != null && !cmpReal ? _pctInfo(t) : _selInfo(t), style: const TextStyle(fontSize: 10.5, color: Colors.white60)),
+                  if (s.ready && t != null && t.valid) Text(_selInfo(t), style: const TextStyle(fontSize: 10.5, color: Colors.white60)),
                 ]),
               ),
               const SizedBox(height: 2),
               Expanded(
                 child: Stack(key: _bodyKey, clipBehavior: Clip.none, children: [
                   Positioned.fill(child: _body(th)),
-                  if (_adjOpen && s.ready && t != null && t.valid)
+                  if (_adjOpen && !_cmpOn && s.ready && t != null && t.valid)
                     Positioned(top: -8, left: _adjLeft(), right: 0, child: Align(alignment: Alignment.topLeft, child: _adjPanel(th))),
                 ]),
               ),
@@ -6915,6 +6942,7 @@ class _TunePageState extends State<TunePage> {
   Widget _topBar(AppTheme th) {
     final t = s.table;
     final can = s.ready && t != null && t.valid;
+    final ed = can && !_cmpOn; // หน้าไฟล์เทียบ = ดูอย่างเดียว
     final is2D = t?.is2D ?? true;
     final dirty = t != null && s.tableDirty(t);
     return SizedBox(
@@ -6925,7 +6953,7 @@ class _TunePageState extends State<TunePage> {
           child: SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             child: Row(children: [
-              _fileMenu(th),
+              IgnorePointer(ignoring: _cmpOn, child: Opacity(opacity: _cmpOn ? 0.35 : 1, child: _fileMenu(th))),
               _tb(
                 th,
                 Row(mainAxisSize: MainAxisSize.min, children: [
@@ -6945,12 +6973,12 @@ class _TunePageState extends State<TunePage> {
                   if (dirty)
                     Positioned(right: -6, top: -4, child: Container(width: 7, height: 7, decoration: const BoxDecoration(color: kAmber, shape: BoxShape.circle))),
                 ]),
-                can ? _okTable : null,
+                ed ? _okTable : null,
                 col: kGreen,
                 active: dirty,
                 width: 42,
               ),
-              _tb(th, const Text('❌', style: TextStyle(fontSize: 15)), can ? _cancelTable : null, col: kBad, width: 42),
+              _tb(th, const Text('❌', style: TextStyle(fontSize: 15)), ed ? _cancelTable : null, col: kBad, width: 42),
               _sep(),
               // ปรับค่า: แตะแล้วกางแผง ช่องค่า | − + % = | X Y XY ~
               _tb(
@@ -6959,26 +6987,24 @@ class _TunePageState extends State<TunePage> {
                   Icon(Icons.edit, size: 15, color: th.c),
                   const SizedBox(width: 5),
                   const Text('ปรับค่า'),
-                  Icon(_adjOpen && can ? Icons.expand_less : Icons.expand_more, size: 18, color: th.c),
+                  Icon(_adjOpen && ed ? Icons.expand_less : Icons.expand_more, size: 18, color: th.c),
                 ]),
-                can ? () => setState(() => _adjOpen = !_adjOpen) : null,
-                active: _adjOpen && can,
+                ed ? () => setState(() => _adjOpen = !_adjOpen) : null,
+                active: _adjOpen && ed,
                 key: _adjKey,
               ),
               _sep(),
-              _tb(th, Icon(Icons.undo, size: 18, color: th.c), s.undoList.isNotEmpty ? _undo : null),
-              _tb(th, Icon(Icons.redo, size: 18, color: th.c), s.redoList.isNotEmpty ? _redo : null),
+              _tb(th, Icon(Icons.undo, size: 18, color: th.c), !_cmpOn && s.undoList.isNotEmpty ? _undo : null),
+              _tb(th, Icon(Icons.redo, size: 18, color: th.c), !_cmpOn && s.redoList.isNotEmpty ? _redo : null),
               _sep(),
-              _tb(th, const Text('COPY', style: TextStyle(fontFamily: kFont, fontSize: 10.5)), can && (_sel != null || (showPct && s.cmpRef != null)) ? _copy : null),
-              _tb(th, const Text('PASTE', style: TextStyle(fontFamily: kFont, fontSize: 10.5)), can && _clip != null ? _paste : null),
+              _tb(th, const Text('COPY', style: TextStyle(fontFamily: kFont, fontSize: 10.5)), can && (_sel != null || _cmpOn) ? _copy : null),
+              _tb(th, const Text('PASTE', style: TextStyle(fontFamily: kFont, fontSize: 10.5)), ed && _clip != null ? _paste : null),
               _tb(th, const Text('AFR', style: TextStyle(fontFamily: kFont, fontSize: 10.5, color: kGreen)), _openAfr, col: kGreen),
-              _tb(th, const Text('AFR→จูน', style: TextStyle(fontSize: 11.5, color: kGreen)), can ? _afrTune : null, col: kGreen),
+              _tb(th, const Text('AFR→จูน', style: TextStyle(fontSize: 11.5, color: kGreen)), ed ? _afrTune : null, col: kGreen),
               GestureDetector(
                 onLongPress: can ? _pickCmp : null, // แตะค้าง = เปลี่ยนไฟล์ที่เทียบ
-                child: _tb(th, Text(showPct && cmpReal ? 'REF' : 'Δ%', style: const TextStyle(fontFamily: kFont, fontSize: 11)), can ? _togglePct : null, active: showPct),
+                child: _tb(th, Text('เทียบ', style: TextStyle(fontSize: 12, color: _cmpOn ? kAmber : null)), can ? _togglePct : null, active: _cmpOn, col: _cmpOn ? kAmber : null),
               ),
-              if (showPct && s.cmpRef != null)
-                _tb(th, const Text('ใช้ค่าเทียบ', style: TextStyle(fontSize: 11.5, color: kAmber)), can ? _useRef : null, col: kAmber),
               _sep(),
               _tb(
                 th,
@@ -6988,7 +7014,7 @@ class _TunePageState extends State<TunePage> {
               _tb(
                 th,
                 Text(view3d ? '2D' : (is2D ? '3D' : 'GRAPH')),
-                can
+                ed
                     ? () => setState(() {
                           view3d = !view3d;
                           if (!view3d) _stopSpin();
@@ -7021,23 +7047,23 @@ class _TunePageState extends State<TunePage> {
 
   // ---- Δ% เทียบไฟล์อ้างอิง ----
   Future<void> _togglePct() async {
-    if (showPct && !cmpReal) {
-      setState(() => cmpReal = true); // Δ% -> ค่าจริงของไฟล์เทียบ
-      return;
-    }
     if (showPct) {
-      setState(() {
-        showPct = false;
-        cmpReal = false;
-      });
+      setState(() => showPct = false); // กลับหน้าไฟล์จริง
       return;
     }
     if (s.cmpRef == null && !await _autoCmp()) {
       await _pickCmp();
       if (s.cmpRef == null) return;
     }
-    if (mounted) setState(() => showPct = true);
+    if (mounted) _enterCmp();
   }
+
+  void _enterCmp() => setState(() {
+        showPct = true;
+        _adjOpen = false; // หน้าไฟล์เทียบแก้ไม่ได้: ปิดแผงปรับค่า / 3D
+        view3d = false;
+        _stopSpin();
+      });
 
   /// เลือกไฟล์ ORIGINAL ในแอปให้อัตโนมัติ: ตรง ID กล่อง > ชื่อ XDF ตรงกัน > ชื่อ BIN ตรงกัน
   Future<bool> _autoCmp() async {
@@ -7117,53 +7143,10 @@ class _TunePageState extends State<TunePage> {
       if (b == null) return;
       s.setCmp(pick.$1, b);
       if (b.length != (s.bin?.length ?? 0)) _snack('ขนาดไฟล์ไม่เท่ากัน — เทียบได้เฉพาะช่องที่อยู่ในขนาดไฟล์');
-      setState(() => showPct = true);
+      _enterCmp();
     } catch (e) {
       _snack('เปิดไฟล์ที่ใช้เทียบไม่ได้: $e');
     }
-  }
-
-  /// เอาค่าจากไฟล์ที่เทียบมาใส่ตารางปัจจุบัน: ช่องที่เลือก หรือทั้งตารางถ้าไม่ได้เลือก (ย้อนกลับได้)
-  Future<void> _useRef() async {
-    final t = s.table;
-    if (t == null || s.cmpRef == null) return;
-    final (r0, c0, r1, c1) = _sel ?? (0, 0, t.rows - 1, t.cols - 1);
-    final out = <(int, int), double>{};
-    for (int r = r0; r <= r1; r++) {
-      for (int c = c0; c <= c1; c++) {
-        final o = s.refVal(t, r, c);
-        if (o != null && (o - s.val(t, r, c)).abs() > 1e-9) out[(r, c)] = o;
-      }
-    }
-    if (out.isEmpty) {
-      _toast('ค่าเท่ากับไฟล์เทียบอยู่แล้ว', col: kGreen);
-      return;
-    }
-    final all = _sel == null;
-    if (!await _confirm('ใช้ค่าจากไฟล์เทียบ', '${all ? 'ทั้งตาราง' : 'ช่องที่เลือก'} ${t.title}\nเปลี่ยน ${out.length} ช่อง ตามค่าใน ${s.cmpName}', ok: 'ใช้ค่า')) return;
-    if (!await _canEdit(t)) return;
-    final n = _w(t, out, 'ใช้ค่าจาก ${s.cmpName}');
-    _snack('ใส่ค่าจากไฟล์เทียบแล้ว $n ช่อง — ย้อนกลับ (↶) ได้');
-  }
-
-  /// สรุป Δ% ของตารางที่เปิดอยู่
-  String _pctInfo(XdfTable t) {
-    int n = 0, all = 0;
-    double mx = 0, mn = 0, sum = 0;
-    for (int r = 0; r < t.rows; r++) {
-      for (int c = 0; c < t.cols; c++) {
-        final d = s.pctDiff(t, r, c);
-        if (d == null) continue;
-        all++;
-        sum += d;
-        if (d.abs() >= 0.05) n++;
-        if (d > mx) mx = d;
-        if (d < mn) mn = d;
-      }
-    }
-    if (all == 0) return 'Δ% เทียบไม่ได้';
-    String f(double v) => '${v > 0 ? '+' : ''}${v.toStringAsFixed(1)}%';
-    return 'ต่าง $n/$all ช่อง · มากสุด ${f(mx)} · น้อยสุด ${f(mn)} · เฉลี่ย ${f(sum / all)}';
   }
 
   // ---- AFR → จูนอัตโนมัติ ----
@@ -7526,7 +7509,7 @@ class _TunePageState extends State<TunePage> {
                 painter: _GridPainter(
                   s: s, t: t, v: v, lo: lo, hi: hi, rowL: rowL, colL: colL,
                   sx: sx, sy: sy, cw: cw, ch: ch, hw: hw, hh: hh,
-                  sel: _sel, lr: lp.$1, lc: lp.$2, th: th, rev: s.rev, cmp: showPct && s.cmpRef != null ? (cmpReal ? 2 : 1) : 0,
+                  sel: _sel, lr: lp.$1, lc: lp.$2, th: th, rev: s.rev, cmp: _cmpOn ? 2 : 0,
                 ),
               ),
             ),
@@ -7759,14 +7742,22 @@ class _GridPainter extends CustomPainter {
         if (cmp == 2) {
           // ค่าจริงของไฟล์เทียบ: สีตามช่วงเดียวกับตารางปัจจุบัน, ช่องที่ต่างจากไฟล์ปัจจุบันมีมุมขาว
           final o = s.refVal(t, r, c);
-          fill.color = o == null ? const Color(0xFF121216) : _heat(hi > lo ? ((o - lo) / span).clamp(0.0, 1.0).toDouble() : 0.5);
+          if (o == null) {
+            fill.color = const Color(0xFF121216);
+          } else {
+            // ดรอปสี: เทา 75% + มืดลง (ไม่สับสนกับไฟล์จริง)
+            final h = _heat(hi > lo ? ((o - lo) / span).clamp(0.0, 1.0).toDouble() : 0.5);
+            final g = h.red * 0.3 + h.green * 0.59 + h.blue * 0.11;
+            int d(int v) => ((v * 0.25 + g * 0.75) * 0.62).round().clamp(0, 255).toInt();
+            fill.color = Color.fromARGB(255, d(h.red), d(h.green), d(h.blue));
+          }
           final rr = rect.deflate(cw > 16 ? 0.5 : 0.2);
           canvas.drawRect(rr, fill);
           if (o != null && (o - x).abs() > 1e-9) {
             final k = math.min(7.0, math.min(cw, ch) * 0.35);
             canvas.drawPath(Path()..moveTo(rr.right - k, rr.top)..lineTo(rr.right, rr.top)..lineTo(rr.right, rr.top + k)..close(), Paint()..color = Colors.white);
           }
-          if (showTxt) _TP.center(canvas, _TP.get(o == null ? '·' : t.fmt(o), fs, o == null ? Colors.white38 : const Color(0xFF000000), maxW: cw), rect.center);
+          if (showTxt) _TP.center(canvas, _TP.get(o == null ? '·' : t.fmt(o), fs, o == null ? Colors.white38 : Colors.white70, maxW: cw), rect.center);
         } else if (cmp == 1) {
           // Δ%: เทาเมื่อเท่าเดิม, แดง = เพิ่ม, ฟ้า = ลด (เข้มตามขนาด เต็มที่ 8%)
           final d = s.pctDiff(t, r, c);
@@ -9166,6 +9157,7 @@ class _FlashPageState extends State<FlashPage> {
   GaugeController get c => widget.c;
   BinEntry? sel;
   Uint8List? data;
+  DateTime? _waitT0; // เวลาที่เห็นเกจเข้าช่วงรอก่อนลบ (นับถอยหลังแท่ง)
   String? extName; // ไฟล์ที่เลือกจากมือถือ (ไม่ได้เก็บเข้าคลัง) — null = ใช้ไฟล์จากคลัง
   double? up; // ความคืบหน้าส่งไฟล์ไปเกจ
   bool working = false;
@@ -9344,6 +9336,8 @@ class _FlashPageState extends State<FlashPage> {
                     child: Text('แก้ตารางที่หน้า TUNE💻 แล้วบันทึกเข้าคลัง → เลือกไฟล์ → ส่งไปเกจ → กด FLASH',
                         maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 11.5, color: Colors.white54)),
                   ),
+                  const SizedBox(width: 8),
+                  glowIconBtn(Icons.settings, th, () => Navigator.of(context).push(hudRoute(SettingsPage(c: c)))),
                 ]),
               ),
               const SizedBox(height: 6),
@@ -9407,11 +9401,6 @@ class _FlashPageState extends State<FlashPage> {
                   Text(name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
                   Text(sub, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 10.5, color: Colors.white54)),
                 ]),
-              ),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                decoration: BoxDecoration(border: Border.all(color: (ck8 == 0 ? kGreen : kAmber).withOpacity(0.5)), borderRadius: BorderRadius.circular(6)),
-                child: Text(ck8 == 0 ? 'SUM ✓' : 'SUM ${_hx(ck8).substring(2)}', style: TextStyle(fontSize: 9.5, color: ck8 == 0 ? kGreen : kAmber)),
               ),
               menu ?? const SizedBox(width: 6),
             ]),
@@ -9617,8 +9606,15 @@ class _FlashPageState extends State<FlashPage> {
     );
     if (go != true || !mounted) return;
     final d = data;
-    if (d == null) return;
-    final err = await c.startFlash(d.length, _sum16);
+    final g = c.t.fl;
+    String? err;
+    if (d != null) {
+      err = await c.startFlash(d.length, _sum16);
+    } else if (g != null && g.fileSize > 0) {
+      err = await c.startFlash(g.fileSize, g.fileSum); // แฟลชไฟล์ที่อยู่ในเกจ (ไม่ได้เลือกไฟล์ในแอพ)
+    } else {
+      return;
+    }
     if (!mounted) return;
     _snack(err ?? 'สั่งเริ่มแฟลชแล้ว — ห้ามปิดกุญแจ / ถอดสาย');
   }
@@ -9633,6 +9629,10 @@ class _FlashPageState extends State<FlashPage> {
     final sum16 = d == null ? null : _sum16;
     // หมายเหตุ: หลังแฟลช เกจคำนวณ checksum ใหม่ลงไฟล์ในเกจ ผลรวมจึงอาจไม่ตรงกับไฟล์ในแอพอีก
     final onGauge = f != null && d != null && f.fileSize == d.length && f.fileSum == sum16;
+    // ไม่ได้เลือกไฟล์ในแอพ แต่ในเกจมีไฟล์อยู่ (เช่นเพิ่งเปิดแอพใหม่) -> แฟลชไฟล์ในเกจได้เลย (เกจตรวจขนาด/ผลรวมอีกรอบ)
+    final useGauge = d == null && f != null && f.fileSize > 0 && f.phase != 2;
+    final flashable = onGauge || useGauge;
+    final gKb = (f?.fileSize ?? 0) / 1024;
     final canSend = connected && f != null && f.prep && !busy && f.phase != 2 && !working && d != null && plan != null && plan.ok;
     final ecuOk = f != null && (f.ecu == 2 || f.ecu == 3 || f.ecu == 5 || f.ecu == 6);
     final fname = extName ?? (sel != null ? '${sel!.name}.bin' : null);
@@ -9662,14 +9662,18 @@ class _FlashPageState extends State<FlashPage> {
     final model = f?.ecm != null ? (ecuModelName(f!.ecm) ?? 'ไม่ทราบรุ่น') : '--';
     final eTxt = f == null || !f.prep ? '--' : '$model · ${switch (f.ecu) { 2 => 'OK', 3 => 'FLASH', 5 || 6 => 'RECOVER', 0 => 'OFF', 1 => 'ไม่ตอบ', _ => '...' }}';
     final eCol = f == null || !f.prep ? Colors.white24 : (ecuOk ? (f.ecu >= 5 ? kAmber : kGreen) : kBad);
-    final inTxt = f == null || f.fileSize == 0 ? 'ยังไม่มีไฟล์' : (onGauge ? '${fname ?? 'ไฟล์'} ✓' : '${(f.fileSize / 1024).round()} KB (คนละไฟล์)');
-    final inCol = f == null || f.fileSize == 0 ? Colors.white24 : (onGauge ? kGreen : kAmber);
+    final inTxt = f == null || f.fileSize == 0
+        ? 'ยังไม่มีไฟล์'
+        : (onGauge ? '${fname ?? 'ไฟล์'} ✓' : (useGauge ? 'ไฟล์ในเกจ ${gKb.round()} KB ✓' : '${gKb.round()} KB (คนละไฟล์)'));
+    final inCol = f == null || f.fileSize == 0 ? Colors.white24 : (flashable ? kGreen : kAmber);
 
     // ---- ขั้นตอน + ความคืบหน้า ----
-    int ok = (d != null ? 1 : 0) + (onGauge || busy || (f?.phase ?? 0) >= 9 ? 1 : 0);
+    int ok = (d != null || useGauge ? 1 : 0) + (flashable || busy || (f?.phase ?? 0) >= 9 ? 1 : 0);
     int now = -1, bad = -1;
     String phTxt = '';
     double? prog;
+    bool barLabel = true; // แสดง % ที่หัวแท่ง
+    if ((f?.phase ?? 0) != 5) _waitT0 = null;
     String sizeTxt = '', midTxt = '', timeTxt = '';
     Color phCol = Colors.white;
     if (up != null) {
@@ -9691,6 +9695,13 @@ class _FlashPageState extends State<FlashPage> {
       phTxt = p == 9 ? 'แฟลชสำเร็จ' : (p == 10 ? 'แฟลชไม่สำเร็จ' : flashPhaseText(p));
       phCol = p == 9 ? kGreen : (p == 10 ? kBad : Colors.white);
       prog = p == 9 ? 1.0 : (f.total > 0 ? f.done / f.total : f.pct / 100);
+      if (p == 5) {
+        // รอก่อนลบ 10.5 วิ: แท่งเต็มแล้วถอยลงทีละขั้น (1/11) ทุก 1 วินาที เหมือนเกจ
+        _waitT0 ??= DateTime.now();
+        final rem = math.max(0, 10500 - DateTime.now().difference(_waitT0!).inMilliseconds);
+        prog = math.min(11, (rem + 999) ~/ 1000) / 11;
+        barLabel = false;
+      }
       sizeTxt = '${((p == 9 ? f.total : f.done) / 1024).round()} / ${(f.total / 1024).round()} KB';
       timeTxt = _mmss(f.elapsed);
       midTxt = p == 9 ? 'CHECKSUM OK' : (p == 10 ? (f.err != 0 ? flashErrText(f.err) : '') : (f.eta > 0 ? 'เหลือ ~${_mmss(f.eta)}' : ''));
@@ -9714,14 +9725,14 @@ class _FlashPageState extends State<FlashPage> {
 
     // ---- ปุ่มแฟลชบนมือถือ ----
     final phoneOk = _gaugePhoneFlash;
-    final canPhone = phoneOk && connected && f != null && f.prep && !busy && f.phase != 2 && !working && onGauge && ecuOk && plan != null && plan.ok;
+    final canPhone = phoneOk && connected && f != null && f.prep && !busy && f.phase != 2 && !working && ecuOk && (useGauge || (onGauge && plan != null && plan.ok));
     final checks = <(bool, String)>[
       (connected && f != null && f.prep, 'เกจอยู่หน้าเตรียมแฟลช'),
       (ecuOk, 'กล่อง ECU ตอบ (${f == null ? '--' : flashEcuText(f.ecu)})'),
-      (onGauge, onGauge ? 'ไฟล์ในเกจตรงกับไฟล์ที่เลือก' : 'ไฟล์ในเกจไม่ตรง — กดส่งไฟล์ไปเกจก่อน'),
+      (flashable, onGauge ? 'ไฟล์ในเกจตรงกับไฟล์ที่เลือก' : (useGauge ? 'แฟลชไฟล์ที่อยู่ในเกจ (${gKb.toStringAsFixed(1)} KB)' : 'ไฟล์ในเกจไม่ตรง — กดส่งไฟล์ไปเกจก่อน')),
     ]; // แบตไม่ใช่เงื่อนไขห้ามแฟลช (1.4.1) — แค่เตือนเมื่อต่ำกว่า 11.5 V
 
-    final askSub = '$model · ${f?.ecm != null ? 'ID ${ecmHex(f!.ecm)} · ' : ''}${((d?.length ?? 0) / 1024).round()} KB';
+    final askSub = '$model · ${f?.ecm != null ? 'ID ${ecmHex(f!.ecm)} · ' : ''}${useGauge ? gKb.round() : ((d?.length ?? 0) / 1024).round()} KB';
 
     // ---- ข้อความบรรทัดล่าง ----
     String note;
@@ -9794,7 +9805,7 @@ class _FlashPageState extends State<FlashPage> {
                     if (prog != null) const Text(' %', style: TextStyle(fontFamily: kFont, fontSize: 10, color: Colors.white54)),
                   ]),
                   const SizedBox(height: 6),
-                  SizedBox(height: 20, child: CustomPaint(painter: _FlBarPainter(prog ?? 0, fail: phCol == kBad))),
+                  FlashBar(frac: prog ?? 0, fail: phCol == kBad, anim: up != null || busy, label: barLabel && prog != null ? '${(prog * 100).round()}%' : null),
                   const SizedBox(height: 5),
                   Row(children: [
                     Text(sizeTxt, style: const TextStyle(fontSize: 12, color: Colors.white70)),
@@ -9807,8 +9818,8 @@ class _FlashPageState extends State<FlashPage> {
               )
             else
               Row(children: [
-                Expanded(child: _btn(th, onGauge ? 'ส่งไฟล์ไปเกจอีกครั้ง' : 'ส่งไฟล์ไปเกจ', canSend ? _send : null, ic: Icons.upload, big: !phoneOk || !onGauge)),
-                if (phoneOk && onGauge) ...[
+                Expanded(child: _btn(th, onGauge ? 'ส่งไฟล์ไปเกจอีกครั้ง' : 'ส่งไฟล์ไปเกจ', canSend ? _send : null, ic: Icons.upload, big: !phoneOk || !flashable)),
+                if (phoneOk && flashable) ...[
                   const SizedBox(width: 8),
                   Expanded(
                     flex: 3,
@@ -9816,7 +9827,7 @@ class _FlashPageState extends State<FlashPage> {
                       opacity: canPhone ? 1 : 0.4,
                       child: InkWell(
                         onTap: canPhone
-                            ? () => _phoneFlash(checks, fname ?? 'ไฟล์', askSub, batt: f?.batt)
+                            ? () => _phoneFlash(checks, useGauge ? 'ไฟล์ในเกจ (${gKb.toStringAsFixed(1)} KB)' : (fname ?? 'ไฟล์'), askSub, batt: f?.batt)
                             : null,
                         child: Container(
                           padding: const EdgeInsets.symmetric(vertical: 12),
@@ -9843,6 +9854,182 @@ class _FlashPageState extends State<FlashPage> {
 }
 
 /// แท่งความคืบหน้าทรงเอียง สีไล่แดง → เขียว (คงที่ ไม่เปลี่ยนตามธีม)
+/// บาร์แฟลช D+E: เส้นแสงบน/ล่าง + จุดแสงวิ่งสวน, ขีดสเกล HUD, แสงสแกนทั้งร่อง, แท่งไล่สีแดง→เขียว
+/// ลายเฉียงวิ่ง + แสงขาววิ่ง 2 ลูก, หัวแท่งเรืองแสง + ประกาย + % เกาะหัวแท่ง (แสงวิ่งเฉพาะตอน anim)
+class FlashBar extends StatefulWidget {
+  final double frac;
+  final bool fail, anim;
+  final String? label;
+  const FlashBar({super.key, required this.frac, this.fail = false, this.anim = false, this.label});
+  @override
+  State<FlashBar> createState() => _FlashBarState();
+}
+
+class _FlashBarState extends State<FlashBar> with SingleTickerProviderStateMixin {
+  late final AnimationController ac = AnimationController(vsync: this, duration: const Duration(hours: 1));
+  @override
+  void initState() {
+    super.initState();
+    if (widget.anim) ac.forward(from: 0);
+  }
+
+  @override
+  void didUpdateWidget(FlashBar o) {
+    super.didUpdateWidget(o);
+    if (widget.anim && !ac.isAnimating) ac.forward(from: 0);
+    if (!widget.anim && ac.isAnimating) ac.stop();
+  }
+
+  @override
+  void dispose() {
+    ac.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => RepaintBoundary(
+        child: SizedBox(
+          height: 38,
+          child: AnimatedBuilder(
+            animation: ac,
+            builder: (_, __) => CustomPaint(
+              size: Size.infinite,
+              painter: _FlBarDE(widget.frac, (ac.value * 3600000).toDouble(), fail: widget.fail, anim: widget.anim, label: widget.label, c: Cfg.i.t.c, c2: Cfg.i.t.c2),
+            ),
+          ),
+        ),
+      );
+}
+
+class _FlBarDE extends CustomPainter {
+  final double f, t; // t = มิลลิวินาที (เวลาแอนิเมชัน)
+  final bool fail, anim;
+  final String? label;
+  final Color c, c2;
+  _FlBarDE(this.f, this.t, {this.fail = false, this.anim = false, this.label, required this.c, required this.c2});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width, h = size.height, sl = 6.0;
+    final y0 = h * 13 / 42, y1 = h * 29 / 42, yTop = h * 7 / 42, yBot = h * 35 / 42;
+    Path poly(double x0, double x1) => Path()
+      ..moveTo(x0 + sl, y0)
+      ..lineTo(x1 + sl, y0)
+      ..lineTo(x1, y1)
+      ..lineTo(x0, y1)
+      ..close();
+    // เส้นแสงบน / ล่าง
+    final ln = Paint()
+      ..color = c
+      ..strokeWidth = 1;
+    canvas.drawLine(Offset(sl + 2, yTop), Offset(w, yTop), Paint()..color = c.withOpacity(0.5)..strokeWidth = 3..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3));
+    canvas.drawLine(Offset(0, yBot), Offset(w - sl - 2, yBot), Paint()..color = c.withOpacity(0.5)..strokeWidth = 3..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3));
+    canvas.drawLine(Offset(sl + 2, yTop), Offset(w, yTop), ln);
+    canvas.drawLine(Offset(0, yBot), Offset(w - sl - 2, yBot), ln);
+    // ขีดสเกล HUD ใต้เส้นล่าง
+    final tk = Paint()..strokeWidth = 1;
+    for (int i = 0; i <= 50; i++) {
+      final x = i * (w - sl) / 50 + 1;
+      tk.color = i % 5 == 0 ? c2.withOpacity(0.55) : Colors.white.withOpacity(0.16);
+      canvas.drawLine(Offset(x, yBot + 2), Offset(x, yBot + (i % 5 == 0 ? 7 : 5)), tk);
+    }
+    // จุดแสงวิ่งสวนบนเส้น
+    if (anim) {
+      final p1 = (t % 1800) / 1800 * w;
+      final dp = Paint()
+        ..color = c2
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 2);
+      canvas.drawRect(Rect.fromLTWH(p1, yTop - 1, 26, 2), dp);
+      canvas.drawRect(Rect.fromLTWH(w - p1 - 26, yBot - 1, 26, 2), dp);
+    }
+    // ร่อง
+    final track = poly(0, w - sl);
+    canvas.drawPath(track, Paint()..color = const Color(0xFF14151C));
+    canvas.drawPath(track, Paint()..color = c.withOpacity(0.4)..style = PaintingStyle.stroke..strokeWidth = 1);
+    // แสงสแกนวิ่งทั้งร่อง
+    if (anim) {
+      final sx = (t % 2000) / 2000 * (w + 200) - 100;
+      canvas.save();
+      canvas.clipPath(track);
+      canvas.drawRect(
+          Rect.fromLTWH(0, 0, w, h),
+          Paint()
+            ..shader = LinearGradient(colors: [
+              const Color(0x005A8CFF),
+              const Color(0x525A8CFF),
+              const Color(0x005A8CFF),
+            ]).createShader(Rect.fromLTWH(sx - 70, 0, 140, h)));
+      canvas.restore();
+    }
+    final fw = (w - sl) * f.clamp(0.0, 1.0);
+    if (fw < 1) return;
+    final bar = poly(0, fw);
+    // แท่ง + เรือง
+    canvas.drawPath(bar, Paint()..color = (fail ? kBad : const Color(0xFFFF5A2D)).withOpacity(0.45)..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6));
+    canvas.drawPath(
+        bar,
+        fail
+            ? (Paint()..color = kBad)
+            : (Paint()..shader = const LinearGradient(colors: [Color(0xFFFF2D2D), Color(0xFF2EE66B)]).createShader(Rect.fromLTWH(0, 0, w, h))));
+    canvas.save();
+    canvas.clipPath(bar);
+    // ลายเฉียงวิ่ง
+    final off = anim ? (t / 25) % 14 : 0.0;
+    final st = Paint()..color = Colors.black.withOpacity(0.2);
+    for (double s = -20; s < fw + 20; s += 14) {
+      canvas.drawPath(
+          Path()
+            ..moveTo(s + off + 6, y0)
+            ..lineTo(s + off + 13, y0)
+            ..lineTo(s + off + 4, y1)
+            ..lineTo(s + off - 3, y1)
+            ..close(),
+          st);
+    }
+    canvas.drawRect(Rect.fromLTWH(0, y0, w, 2), Paint()..color = Colors.white.withOpacity(0.32));
+    // แสงขาววิ่ง 2 ลูก
+    if (anim) {
+      for (final ph in const [0.0, 0.5]) {
+        final sx = (((t / 1100) + ph) % 1) * (fw + 120) - 60;
+        canvas.drawRect(
+            Rect.fromLTWH(0, 0, w, h),
+            Paint()
+              ..shader = const LinearGradient(colors: [Color(0x00FFFFFF), Color(0x80FFFFFF), Color(0x00FFFFFF)])
+                  .createShader(Rect.fromLTWH(sx - 40, 0, 80, h)));
+      }
+    }
+    canvas.restore();
+    // หัวแท่ง: เส้นขาว + จุดแสง + ประกาย
+    final cy = (y0 + y1) / 2;
+    final glow = Paint()
+      ..color = Colors.white
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 5);
+    canvas.drawRect(Rect.fromLTWH(fw + 2, y0 - 3, 2, y1 - y0 + 6), glow);
+    canvas.drawRect(Rect.fromLTWH(fw + 2, y0 - 3, 2, y1 - y0 + 6), Paint()..color = Colors.white);
+    canvas.drawCircle(Offset(fw + 3, cy), 2.6, glow);
+    canvas.drawCircle(Offset(fw + 3, cy), 2.2, Paint()..color = Colors.white);
+    if (anim) {
+      for (int k = 0; k < 6; k++) {
+        final a = (t / 300 + k * 1.7) % 1;
+        final px = fw + 4 + a * 16, py = cy + math.sin(k * 2.1 + t / 200) * 7 * a;
+        canvas.drawRect(Rect.fromLTWH(px, py, 2, 2), Paint()..color = Colors.white.withOpacity(1 - a));
+      }
+    }
+    // % เกาะหัวแท่ง
+    final lb = label;
+    if (lb != null) {
+      final tp = TextPainter(
+        text: TextSpan(text: lb, style: const TextStyle(fontFamily: kFont, fontSize: 9, color: Colors.white)),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      tp.paint(canvas, Offset(math.min(w - tp.width - 2, fw + 8), y0 - tp.height - 1));
+    }
+  }
+
+  @override
+  bool shouldRepaint(_FlBarDE o) => o.f != f || o.t != t || o.fail != fail || o.anim != anim || o.label != label || o.c != c;
+}
+
 class _FlBarPainter extends CustomPainter {
   final double f;
   final bool fail;
