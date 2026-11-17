@@ -49,7 +49,7 @@ const kThemes = <AppTheme>[
 
 // เวอร์ชันเฟิร์มแวร์ที่แอพรุ่นนี้ออกแบบมาให้ใช้คู่กัน (แสดงเทียบในหน้า SETTING)
 const kAppFw = '1.0.20';
-const kAppVer = '1.4.4'; // เวอร์ชันแอพ (ตรงกับ pubspec.yaml)
+const kAppVer = '1.4.5'; // เวอร์ชันแอพ (ตรงกับ pubspec.yaml)
 
 // ---------- ค่าคีย์ที่แสดงได้ (เหมือน TEST1 + TOP SPD) ----------
 const int kTps = 0, kTemp = 1, kBatt = 2, kAfr = 3, kInj = 4, kIgn = 5, kRpm = 6, kMap = 7,
@@ -363,8 +363,21 @@ Widget statusChips(GaugeController c) {
   );
 }
 
-/// โลโก้หัวแอพ (ภาพ assets/logo.png พื้นโปร่งใส) — size 17 ≈ สูง 20 px
-Widget mfbLogo(AppTheme th, {double size = 17}) => Image.asset('assets/logo.png', height: size * 1.2, fit: BoxFit.contain, filterQuality: FilterQuality.medium);
+/// โลโก้หัวแอพ (1.4.5): ภาพมาสก์ 2 ชั้น 962x120 — ตัวอักษร + ขอบ = ดำ | ช่องรอบตัวอักษร + รูตัว B = สีธีม (เปลี่ยนตามธีมทันที)
+/// size 17 ≈ สูง 20 px (เท่าเดิม)
+Widget mfbLogo(AppTheme th, {double size = 17}) {
+  final h = size * 1.2;
+  return SizedBox(
+    height: h,
+    width: h * 962 / 120,
+    child: Stack(fit: StackFit.expand, children: [
+      Image.asset('assets/logo_black.png',
+          fit: BoxFit.contain, color: Colors.black, colorBlendMode: BlendMode.srcIn, filterQuality: FilterQuality.medium),
+      Image.asset('assets/logo_ring.png',
+          fit: BoxFit.contain, color: th.c, colorBlendMode: BlendMode.srcIn, filterQuality: FilterQuality.medium),
+    ]),
+  );
+}
 
 // ---------- สไตล์ HUD: กรอบตัดมุมซ้ายบน/ขวาล่าง + ขีดมุมขวาบน + เรืองแสงเบา ๆ (~10%) ----------
 class HudBorder extends ShapeBorder {
