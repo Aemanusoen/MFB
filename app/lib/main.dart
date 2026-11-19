@@ -23,7 +23,7 @@ final Guid kData = Guid('7a0f0002-5a41-5201-9c11-2a52a1c0de01');
 final Guid kCmd = Guid('7a0f0003-5a41-5201-9c11-2a52a1c0de01');
 final Guid kImg = Guid('7a0f0004-5a41-5201-9c11-2a52a1c0de01');
 
-const kFont = 'Draco';
+const kFont = 'daggersquare.oblique';
 const kGreen = Color(0xFF3CFF8A);
 const kAmber = Color(0xFFFFB020);
 const kBad = Color(0xFFFF4D4D);
