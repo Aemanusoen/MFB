@@ -40,6 +40,6 @@ flutter:
     - assets/original/
     - assets/ecm_database.json
   fonts:
-    - family: Ethnocentric
-      fonts:
-        - asset: assets/fonts/ethnocentric_rg.ttf
+    - family: Draco
+      fonts:             
+        - asset: assets/fonts/Draco.otf
