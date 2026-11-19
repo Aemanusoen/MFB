@@ -42,4 +42,4 @@ flutter:
   fonts:
     - family: daggersquare.oblique
       fonts:
-        - asset: assets/fonts/daggersquare_oblique.otf
+        - asset: assets/fonts/daggersquare.oblique.otf
