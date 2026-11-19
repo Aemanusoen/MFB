@@ -42,4 +42,4 @@ flutter:
   fonts:
     - family: Draco
       fonts:             
-        - asset: assets/fonts/Draco.otf
+        - asset: assets/fonts/daggersquare.oblique.otf
