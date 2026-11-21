@@ -23,7 +23,7 @@ final Guid kData = Guid('7a0f0002-5a41-5201-9c11-2a52a1c0de01');
 final Guid kCmd = Guid('7a0f0003-5a41-5201-9c11-2a52a1c0de01');
 final Guid kImg = Guid('7a0f0004-5a41-5201-9c11-2a52a1c0de01');
 
-const kFont = 'daggersquare.oblique';
+const kFont = 'MFBDagger'; // DAGGERSQUARE OBLIQUE ตัวใหญ่หมด ขยาย 13% หนาขึ้น (เดิม Ethnocentric)
 const kGreen = Color(0xFF3CFF8A);
 const kAmber = Color(0xFFFFB020);
 const kBad = Color(0xFFFF4D4D);
@@ -49,7 +49,7 @@ const kThemes = <AppTheme>[
 
 // เวอร์ชันเฟิร์มแวร์ที่แอพรุ่นนี้ออกแบบมาให้ใช้คู่กัน (แสดงเทียบในหน้า SETTING)
 const kAppFw = '1.0.20';
-const kAppVer = '1.4.5'; // เวอร์ชันแอพ (ตรงกับ pubspec.yaml)
+const kAppVer = '1.4.6'; // เวอร์ชันแอพ (ตรงกับ pubspec.yaml)
 
 // ---------- ค่าคีย์ที่แสดงได้ (เหมือน TEST1 + TOP SPD) ----------
 const int kTps = 0, kTemp = 1, kBatt = 2, kAfr = 3, kInj = 4, kIgn = 5, kRpm = 6, kMap = 7,
@@ -363,21 +363,8 @@ Widget statusChips(GaugeController c) {
   );
 }
 
-/// โลโก้หัวแอพ (1.4.5): ภาพมาสก์ 2 ชั้น 962x120 — ตัวอักษร + ขอบ = ดำ | ช่องรอบตัวอักษร + รูตัว B = สีธีม (เปลี่ยนตามธีมทันที)
-/// size 17 ≈ สูง 20 px (เท่าเดิม)
-Widget mfbLogo(AppTheme th, {double size = 17}) {
-  final h = size * 1.2;
-  return SizedBox(
-    height: h,
-    width: h * 962 / 120,
-    child: Stack(fit: StackFit.expand, children: [
-      Image.asset('assets/logo_black.png',
-          fit: BoxFit.contain, color: Colors.black, colorBlendMode: BlendMode.srcIn, filterQuality: FilterQuality.medium),
-      Image.asset('assets/logo_ring.png',
-          fit: BoxFit.contain, color: th.c, colorBlendMode: BlendMode.srcIn, filterQuality: FilterQuality.medium),
-    ]),
-  );
-}
+/// โลโก้หัวแอพ (ภาพ assets/logo.png พื้นโปร่งใส) — size 17 ≈ สูง 20 px
+Widget mfbLogo(AppTheme th, {double size = 17}) => Image.asset('assets/logo.png', height: size * 1.2, fit: BoxFit.contain, filterQuality: FilterQuality.medium);
 
 // ---------- สไตล์ HUD: กรอบตัดมุมซ้ายบน/ขวาล่าง + ขีดมุมขวาบน + เรืองแสงเบา ๆ (~10%) ----------
 class HudBorder extends ShapeBorder {
@@ -4614,6 +4601,119 @@ class EcuDb {
 const kOriginals = <OrigPack>[
   OrigPack('K03-H01', 'assets/original/K03-H01.bin', 'assets/original/K03-H01.xdf',
       model: 'Wave 110i (2019-2020)', ecuId: [0x01, 0x01, 0x88, 0x0D, 0x01], binKb: 64, xdfKb: 17),
+  // ---- ชุดเพิ่ม 1.4.6 (ID กล่องจาก ecm_database.json ตามรหัสพาร์ท; ไม่มีในฐานข้อมูล = ไม่ระบุ ID) ----
+  OrigPack('K03-T61', 'assets/original/38770-K03-T61_WAVE110i_2014.bin', 'assets/original/38770-K03-T61_WAVE110i_2014.xdf',
+      model: 'WAVE 110i 2014', ecuId: [0x01, 0x01, 0x61, 0x0D, 0x01], binKb: 48, xdfKb: 31),
+  OrigPack('K1M-T01', 'assets/original/38770-K1M-T01_SUPER_CUP_2020-2021.bin', 'assets/original/38770-K1M-T01_SUPER_CUP_2020-2021.xdf',
+      model: 'SUPER CUP 2020-2021', ecuId: [0x01, 0x03, 0xFA, 0x0D, 0x01], binKb: 64, xdfKb: 33),
+  OrigPack('K26-901', 'assets/original/38770-K26-901_MSX-2013.bin', 'assets/original/38770-K26-901_MSX-2013.xdf',
+      model: 'MSX 2013', ecuId: [0x01, 0x01, 0x35, 0x0D, 0x01], binKb: 48, xdfKb: 34),
+  OrigPack('K26-911', 'assets/original/38770-K26-911_MSX-2014.bin', 'assets/original/38770-K26-911_MSX-2014.xdf',
+      model: 'MSX 2014', ecuId: [0x01, 0x01, 0x35, 0x05, 0x01], binKb: 48, xdfKb: 34),
+  OrigPack('K26-B02', 'assets/original/38770-K26-B02_MSX125_2016.bin', 'assets/original/38770-K26-B02_MSX125_2016.xdf',
+      model: 'MSX 125 2016', ecuId: [0x01, 0x02, 0x13, 0x0D, 0x01], binKb: 64, xdfKb: 34),
+  OrigPack('K2E-T02', 'assets/original/38770-K2E-T02_CT125.bin', 'assets/original/38770-K2E-T02_CT125.xdf',
+      model: 'CT125', binKb: 96, xdfKb: 38),
+  OrigPack('K2J-T01', 'assets/original/38770-K2J-T01_WAVE110i_2021-2022.bin', 'assets/original/38770-K2J-T01_WAVE110i_2021-2022.xdf',
+      model: 'WAVE 110i 2021-2022', ecuId: [0x01, 0x04, 0x0F, 0x0D, 0x01], binKb: 64, xdfKb: 32),
+  OrigPack('K2J-TH1', 'assets/original/38770-K2J-TH1_WAVE_110i_2024.bin', 'assets/original/38770-K2J-TH1_WAVE_110i_2024.xdf',
+      model: 'WAVE 110i 2024', ecuId: [0x01, 0x05, 0x55, 0x0D, 0x01], binKb: 64, xdfKb: 33),
+  OrigPack('K2J-TQ1 (1)', 'assets/original/38770-K2J-TQ1_WAVE_110i_2026.bin', 'assets/original/38770-K2J-TQ1_WAVE_110i_2026.xdf',
+      model: 'WAVE 110i 2026', binKb: 64, xdfKb: 61),
+  OrigPack('K2J-TQ1 (2)', 'assets/original/38770-K2J-TQ1_WAVE110i_2026.bin', 'assets/original/38770-K2J-TQ1_WAVE110i_2026.xdf',
+      model: 'WAVE 110i 2026', binKb: 64, xdfKb: 62),
+  OrigPack('K3F-T01', 'assets/original/38770-K3F-T01_WAVE125i_2023.bin', 'assets/original/38770-K3F-T01_WAVE125i_2023.xdf',
+      model: 'WAVE 125i 2023', ecuId: [0x01, 0x04, 0x7B, 0x0D, 0x01], binKb: 64, xdfKb: 32),
+  OrigPack('K3F-T41', 'assets/original/38770-K3F-T41_WAVE_125_2025-2026.bin', 'assets/original/38770-K3F-T41_WAVE_125_2025-2026.xdf',
+      model: 'WAVE 125 2025-2026', binKb: 64, xdfKb: 71),
+  OrigPack('K3F-T61', 'assets/original/38770-K3F-T61_WAVE125i-2026.bin', 'assets/original/38770-K3F-T61_WAVE125i-2026.xdf',
+      model: 'WAVE 125i 2026', binKb: 96, xdfKb: 52),
+  OrigPack('K58-T81', 'assets/original/38770-K58-T81_WAVE110i_2018.bin', 'assets/original/38770-K58-T81_WAVE110i_2018.xdf',
+      model: 'WAVE 110i 2018', ecuId: [0x01, 0x02, 0xB9, 0x0D, 0x01], binKb: 64, xdfKb: 34),
+  OrigPack('K58-TC0', 'assets/original/38770-K58-TC0_WAVE110i_2019.bin', 'assets/original/38770-K58-TC0_WAVE110i_2019.xdf',
+      model: 'WAVE 110i 2019', binKb: 64, xdfKb: 34),
+  OrigPack('K58-TC2', 'assets/original/38770-K58-TC2_WAVE110i_2020.bin', 'assets/original/38770-K58-TC2_WAVE110i_2020.xdf',
+      model: 'WAVE 110i 2020', ecuId: [0x01, 0x03, 0x4C, 0x0D, 0x01], binKb: 64, xdfKb: 35),
+  OrigPack('K73-T32', 'assets/original/38770-K73-T32_WAVE125i_2017.bin', 'assets/original/38770-K73-T32_WAVE125i_2017.xdf',
+      model: 'WAVE 125i 2017', ecuId: [0x01, 0x02, 0x58, 0x0D, 0x01], binKb: 64, xdfKb: 34),
+  OrigPack('K73-T61', 'assets/original/38770-K73-T61_WAVE125i_2020.bin', 'assets/original/38770-K73-T61_WAVE125i_2020.xdf',
+      model: 'WAVE 125i 2020', ecuId: [0x01, 0x03, 0x3E, 0x0D, 0x01], binKb: 64, xdfKb: 35),
+  OrigPack('K73-TC2', 'assets/original/38770-K73-TC2_WAVE125i_2020.bin', 'assets/original/38770-K73-TC2_WAVE125i_2020.xdf',
+      model: 'WAVE 125i 2020', ecuId: [0x01, 0x03, 0x4F, 0x18, 0x01], binKb: 64, xdfKb: 56),
+  OrigPack('K76-T61', 'assets/original/38770-K76-T61_DREAM110i_2019.bin', 'assets/original/38770-K76-T61_DREAM110i_2019.xdf',
+      model: 'DREAM 110i 2019', binKb: 64, xdfKb: 34),
+  OrigPack('K76-T62', 'assets/original/38770-K76-T62_DREAM110i_2019.bin', 'assets/original/38770-K76-T62_DREAM110i_2019.xdf',
+      model: 'DREAM 110i 2019', ecuId: [0x01, 0x02, 0xB5, 0x0D, 0x01], binKb: 64, xdfKb: 34),
+  OrigPack('KWW-642', 'assets/original/38770-KWW-642_WAVE110i_2014.bin', 'assets/original/38770-KWW-642_WAVE110i_2014.xdf',
+      model: 'WAVE 110i 2014', ecuId: [0x01, 0x00, 0xCE, 0x0D, 0x01], binKb: 48, xdfKb: 34),
+  OrigPack('KWW-643', 'assets/original/38770-KWW-643_WAVE110i_2014.bin', 'assets/original/38770-KWW-643_WAVE110i_2014.xdf',
+      model: 'WAVE 110i 2014', ecuId: [0x01, 0x00, 0xCE, 0x0D, 0x02], binKb: 48, xdfKb: 34),
+  OrigPack('KYZ-T03', 'assets/original/38770-KYZ-T03_WAVE_125i_2012.bin', 'assets/original/38770-KYZ-T03_WAVE_125i_2012.xdf',
+      model: 'WAVE 125i 2012', ecuId: [0x01, 0x00, 0xFB, 0x0E, 0x02], binKb: 48, xdfKb: 34),
+  OrigPack('KYZ-T41', 'assets/original/38770-KYZ-T41_WAVE125i_2014.bin', 'assets/original/38770-KYZ-T41_WAVE125i_2014.xdf',
+      model: 'WAVE 125i 2014', ecuId: [0x01, 0x01, 0xB3, 0x0D, 0x01], binKb: 64, xdfKb: 34),
+  OrigPack('KZV-A61', 'assets/original/38770-KZV-A61_DREAM110i_2017.bin', 'assets/original/38770-KZV-A61_DREAM110i_2017.xdf',
+      model: 'DREAM 110i 2017', ecuId: [0x01, 0x01, 0xBA, 0x0D, 0x01], binKb: 64, xdfKb: 34),
+  OrigPack('KZV-K02', 'assets/original/38770-KZV-K02_WAVE110i.bin', 'assets/original/38770-KZV-K02_WAVE110i.xdf',
+      model: 'WAVE 110i', binKb: 48, xdfKb: 34),
+  OrigPack('KZV-T02', 'assets/original/38770-KZV-T02_DREAM_110i.bin', 'assets/original/38770-KZV-T02_DREAM_110i.xdf',
+      model: 'DREAM 110i', binKb: 48, xdfKb: 34),
+  OrigPack('KZV-T03', 'assets/original/38770-KZV-T03_DREAM_110i_2015.bin', 'assets/original/38770-KZV-T03_DREAM_110i_2015.xdf',
+      model: 'DREAM 110i 2015', binKb: 48, xdfKb: 34),
+  OrigPack('K0WF-T01', 'assets/original/ADV150_30400-K0WF-T01.bin', 'assets/original/ADV150_30400-K0WF-T01.xdf',
+      model: 'ADV 150', ecuId: [0x01, 0x03, 0x7C, 0x0D, 0x01], binKb: 384, xdfKb: 42),
+  OrigPack('K0WL-T01', 'assets/original/ADV160_30400-K0WL-T01.bin', 'assets/original/ADV160_30400-K0WL-T01.xdf',
+      model: 'ADV 160', binKb: 384, xdfKb: 50),
+  OrigPack('K0WM-TA1', 'assets/original/ADV160_30400-K0WM-TA1_2023.bin', 'assets/original/ADV160_30400-K0WM-TA1_2023.xdf',
+      model: 'ADV 160 2023', ecuId: [0x01, 0x04, 0x8E, 0x0D, 0x01], binKb: 384, xdfKb: 50),
+  OrigPack('K2SF-T01', 'assets/original/30400-K2SF-T01_CLICK160.bin', 'assets/original/30400-K2SF-T01_CLICK160.xdf',
+      model: 'CLICK 160', ecuId: [0x01, 0x04, 0x6D, 0x0D, 0x01], binKb: 256, xdfKb: 34),
+  OrigPack('K2SN-T51', 'assets/original/30400-K2SN-T51_Click125i2026.bin', 'assets/original/30400-K2SN-T51_Click125i2026.xdf',
+      model: 'CLICK 125i 2026', binKb: 256, xdfKb: 33),
+  OrigPack('K59K-T11', 'assets/original/30400-K59K-T11_Click150_2018-2020.bin', 'assets/original/30400-K59K-T11_Click150_2018-2020.xdf',
+      model: 'CLICK 150 2018-2020', ecuId: [0x01, 0x03, 0x07, 0x0D, 0x01], binKb: 384, xdfKb: 23),
+  OrigPack('K60S-T71', 'assets/original/30400-K60S-T71_Click125_2016-2017.bin', 'assets/original/30400-K60S-T71_Click125_2016-2017.xdf',
+      model: 'CLICK 125 2016-2017', ecuId: [0x01, 0x03, 0x0A, 0x0D, 0x01], binKb: 384, xdfKb: 30),
+  OrigPack('KVB-S53', 'assets/original/38700_KVB_S53_Click_110i.bin', 'assets/original/38700_KVB_S53_Click_110i.xdf',
+      model: 'CLICK 110i', binKb: 48, xdfKb: 35),
+  OrigPack('K3MF-T01', 'assets/original/30400-K3MF-T01_GIORNO125.bin', 'assets/original/30400-K3MF-T01_GIORNO125.xdf',
+      model: 'GIORNO 125', ecuId: [0x01, 0x05, 0x2A, 0x0D, 0x01], binKb: 256, xdfKb: 91),
+  OrigPack('K3MH-T71', 'assets/original/30400-K3MH-T71_GIORNO125_2026.bin', 'assets/original/30400-K3MH-T71_GIORNO125_2026.xdf',
+      model: 'GIORNO 125 2026', binKb: 256, xdfKb: 72),
+  OrigPack('K12M-J61-J01', 'assets/original/30400-K12M-J61-J01_LEAD2V.bin', 'assets/original/30400-K12M-J61-J01_LEAD2V.xdf',
+      model: 'LEAD2V', binKb: 384, xdfKb: 35),
+  OrigPack('K2TA-T02', 'assets/original/30400-K2TA-T02_LEAD125.bin', 'assets/original/30400-K2TA-T02_LEAD125.xdf',
+      model: 'LEAD 125', ecuId: [0x01, 0x04, 0x78, 0x0D, 0x01], binKb: 256, xdfKb: 84),
+  OrigPack('K2TG-T21', 'assets/original/30400-K2TG-T21_LEAD125_2025.bin', 'assets/original/30400-K2TG-T21_LEAD125_2025.xdf',
+      model: 'LEAD 125 2025', binKb: 256, xdfKb: 56),
+  OrigPack('K2TK-T51', 'assets/original/30400-K2TK-T51-LEAD_2026.bin', 'assets/original/30400-K2TK-T51-LEAD_2026.xdf',
+      model: 'LEAD 2026', binKb: 256, xdfKb: 55),
+  OrigPack('K1ZT-TF2', 'assets/original/30400_K1ZT-TF2_PCX_2026.bin', 'assets/original/30400_K1ZT-TF2_PCX_2026.xdf',
+      model: 'PCX 2026', binKb: 384, xdfKb: 72),
+  OrigPack('K1ZF-T01', 'assets/original/30400-K1ZF-T01_PCX160.bin', 'assets/original/30400-K1ZF-T01_PCX160.xdf',
+      model: 'PCX 160', ecuId: [0x01, 0x03, 0xD0, 0x0D, 0x01], binKb: 384, xdfKb: 56),
+  OrigPack('K1ZF-T11', 'assets/original/30400-K1ZF-T11_PCX160.bin', 'assets/original/30400-K1ZF-T11_PCX160.xdf',
+      model: 'PCX 160', ecuId: [0x01, 0x03, 0xCF, 0x0D, 0x01], binKb: 384, xdfKb: 56),
+  OrigPack('K1ZP-T51', 'assets/original/30400-K1ZP-T51_PCX160.bin', 'assets/original/30400-K1ZP-T51_PCX160.xdf',
+      model: 'PCX 160', ecuId: [0x01, 0x05, 0x05, 0x0D, 0x01], binKb: 384, xdfKb: 69),
+  OrigPack('K1ZP-T71', 'assets/original/30400-K1ZP-T71_PCX160.bin', 'assets/original/30400-K1ZP-T71_PCX160.xdf',
+      model: 'PCX 160', ecuId: [0x01, 0x05, 0x04, 0x0D, 0x01], binKb: 384, xdfKb: 66),
+  OrigPack('K1ZT-TC1', 'assets/original/30400-K1ZT-TC1_PCX160.bin', 'assets/original/30400-K1ZT-TC1_PCX160.xdf',
+      model: 'PCX 160', binKb: 384, xdfKb: 65),
+  OrigPack('K1ZT-TC2', 'assets/original/30400-K1ZT-TC2_PCX160_2026.bin', 'assets/original/30400-K1ZT-TC2_PCX160_2026.xdf',
+      model: 'PCX 160 2026', binKb: 384, xdfKb: 78),
+  OrigPack('K1ZT-TF1', 'assets/original/30400-K1ZT-TF1_PCX160.bin', 'assets/original/30400-K1ZT-TF1_PCX160.xdf',
+      model: 'PCX 160', binKb: 384, xdfKb: 65),
+  OrigPack('K36F-T01', 'assets/original/30400-K36F-T01_PCX150.bin', 'assets/original/30400-K36F-T01_PCX150.xdf',
+      model: 'PCX 150', ecuId: [0x01, 0x01, 0x99, 0x0D, 0x01], binKb: 384, xdfKb: 59),
+  OrigPack('K36S-T31', 'assets/original/30400-K36S-T31_PCX150.bin', 'assets/original/30400-K36S-T31_PCX150.xdf',
+      model: 'PCX 150', ecuId: [0x01, 0x02, 0x18, 0x0D, 0x01], binKb: 384, xdfKb: 67),
+  OrigPack('K97F-T01', 'assets/original/30400-K97F-T01_PCX150.bin', 'assets/original/30400-K97F-T01_PCX150.xdf',
+      model: 'PCX 150', binKb: 384, xdfKb: 62),
+  OrigPack('K20-T01', 'assets/original/30400-K20-T01_Zoomer_x.bin', 'assets/original/30400-K20-T01_Zoomer_x.xdf',
+      model: 'ZOOMER-X', binKb: 64, xdfKb: 27),
+  OrigPack('K20J-T21', 'assets/original/30400-K20J-T21_Zoomer-X.bin', 'assets/original/30400-K20J-T21_Zoomer-X.xdf',
+      model: 'ZOOMER-X', ecuId: [0x01, 0x01, 0xFF, 0x0D, 0x01], binKb: 256, xdfKb: 21),
 ];
 
 /// เลือกไฟล์จากเครื่องเฉพาะนามสกุลที่กำหนด (bin / xdf) ; คืน (ชื่อไฟล์, ไบต์) หรือ null
@@ -7085,11 +7185,12 @@ class _TunePageState extends State<TunePage> {
     for (final o in kOriginals) {
       if (o.matches(ecm)) p ??= o;
     }
+    String nk(String? n) => (n ?? '').toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]'), ''); // ไม่สนช่องว่าง/ขีด/ตัวเล็กใหญ่
     for (final o in kOriginals) {
-      if (o.xdfName == s.xdfName) p ??= o;
+      if (s.xdfName != null && nk(o.xdfName) == nk(s.xdfName)) p ??= o;
     }
     for (final o in kOriginals) {
-      if (o.binName == s.binName) p ??= o;
+      if (s.binName != null && nk(o.binName) == nk(s.binName)) p ??= o;
     }
     if (p == null) return false;
     try {
@@ -7308,7 +7409,7 @@ class _TunePageState extends State<TunePage> {
           PopupMenuItem(
               value: 1,
               child: _menuRow(Icons.folder_special, _pickLabel,
-                  'ไฟล์ ORIGINAL: ${kOriginals.map((o) => o.name).join(', ')}${_pickMode == 0 ? '' : (_pickMode == 2 ? ' · BIN ปัจจุบันไม่ถูกเปลี่ยน' : ' · XDF ปัจจุบันไม่ถูกเปลี่ยน')}', kGreen)),
+                  'ไฟล์ ORIGINAL ${kOriginals.length} ชุด${_pickMode == 0 ? '' : (_pickMode == 2 ? ' · BIN ปัจจุบันไม่ถูกเปลี่ยน' : ' · XDF ปัจจุบันไม่ถูกเปลี่ยน')}', kGreen)),
           PopupMenuItem(value: 2, child: _menuRow(Icons.folder_open, 'เปิด BIN', s.binName ?? 'เฉพาะไฟล์ .bin', th.c)),
           PopupMenuItem(value: 3, child: _menuRow(Icons.description, 'เปิด XDF', s.xdfName ?? 'เฉพาะไฟล์ .xdf', th.c)),
           PopupMenuItem(value: 4, child: _menuRow(Icons.folder_copy, 'เปิดไฟล์จากคลังไฟล์', 'ไฟล์ที่บันทึกไว้ในแอพ', th.c2)),
